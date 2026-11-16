@@ -1,0 +1,249 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
+
+html, body, .stApp, .stMain { background: #f6f6f6 !important; }
+[data-testid="stHeader"], [data-testid="stToolbar"],
+[data-testid="stDecoration"], #MainMenu { display: none !important; }
+.stMainBlockContainer {
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Keep the design's element proportions. Let only the two page regions
+   expand with the browser width. */
+.pacs-login-stage {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    container-type: size;
+    background: #f6f6f6;
+    font-family: 'Noto Sans KR', sans-serif;
+    font-weight: 400;
+}
+.pacs-login-stage * { box-sizing: border-box; }
+.pacs-login-left, .pacs-login-right { --unit: calc(100cqh / 960); }
+.pacs-login-left {
+    position: absolute; inset: 0 auto 0 0;
+    width: 26.944444%;
+    background: #191919; color: #f8f8f8;
+}
+.pacs-login-right {
+    position: absolute; top: 0; bottom: 0;
+    left: 26.944444%;
+    width: 73.055556%;
+    background: #f6f6f6;
+}
+.pacs-login-left > *, .pacs-login-right > * { position: absolute; margin: 0; }
+.pacs-login-mark {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 48);
+    width: calc(var(--unit) * 28); height: calc(var(--unit) * 28);
+    border-radius: calc(var(--unit) * 6); background: #f4f4f4;
+}
+.pacs-login-mark::before, .pacs-login-mark::after {
+    content: ''; position: absolute; background: #191919;
+    border-radius: calc(var(--unit) * 1);
+}
+.pacs-login-mark::before {
+    left: calc(var(--unit) * 6); top: calc(var(--unit) * 12);
+    width: calc(var(--unit) * 16); height: calc(var(--unit) * 4);
+}
+.pacs-login-mark::after {
+    left: calc(var(--unit) * 12); top: calc(var(--unit) * 6);
+    width: calc(var(--unit) * 4); height: calc(var(--unit) * 16);
+}
+.pacs-login-brand {
+    left: calc(var(--unit) * 87); top: calc(var(--unit) * 43);
+    color: #fff; font-size: calc(var(--unit) * 23);
+    font-weight: 700; line-height: calc(var(--unit) * 36);
+}
+.pacs-login-subtitle {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 90);
+    color: #acacac; font-size: calc(var(--unit) * 12);
+    line-height: calc(var(--unit) * 19);
+}
+.pacs-login-left-rule {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 137);
+    width: calc(100% - var(--unit) * 88); height: max(1px, calc(var(--unit) * 1));
+    background: #363636;
+}
+.pacs-login-eyebrow {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 268);
+    color: #a6a6a6; font-size: calc(var(--unit) * 10);
+    font-weight: 500; line-height: calc(var(--unit) * 16);
+    white-space: nowrap;
+}
+.pacs-login-intro-title {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 305);
+    color: #f8f8f8; font-size: calc(var(--unit) * 34);
+    font-weight: 700; line-height: calc(var(--unit) * 53);
+    white-space: nowrap;
+}
+.pacs-login-intro-copy {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 432);
+    color: #b1b1b1; font-size: calc(var(--unit) * 14);
+    line-height: calc(var(--unit) * 22); white-space: nowrap;
+}
+.pacs-login-left-footer-rule {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 852);
+    width: calc(100% - var(--unit) * 88); height: max(1px, calc(var(--unit) * 1));
+    background: #363636;
+}
+.pacs-login-staff {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 874);
+    color: #cdcdcd; font-size: calc(var(--unit) * 12);
+    font-weight: 500; line-height: calc(var(--unit) * 19);
+}
+.pacs-login-staff-note {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 899);
+    color: #a3a3a3; font-size: calc(var(--unit) * 11);
+    line-height: calc(var(--unit) * 17); white-space: nowrap;
+}
+.pacs-login-version {
+    right: calc(var(--unit) * 40); top: calc(var(--unit) * 890);
+    color: #a3a3a3; font-size: calc(var(--unit) * 11);
+    line-height: calc(var(--unit) * 17);
+}
+.pacs-login-security {
+    right: calc(var(--unit) * 88); top: calc(var(--unit) * 65);
+    color: #666; font-size: calc(var(--unit) * 11);
+    line-height: calc(var(--unit) * 17); white-space: nowrap;
+}
+.pacs-login-top-rule {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 134);
+    right: calc(var(--unit) * 62); height: max(1px, calc(var(--unit) * 1));
+    background: #e2e2e2;
+}
+.pacs-login-card {
+    left: 50%; top: calc(var(--unit) * 198);
+    transform: translateX(-50%);
+    width: calc(var(--unit) * 460); height: calc(var(--unit) * 536);
+    border: max(1px, calc(var(--unit) * 1)) solid #dedede;
+    border-radius: calc(var(--unit) * 6); background: #fff;
+}
+.pacs-login-card > * { position: absolute; margin: 0; }
+.pacs-login-title {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 40);
+    color: #1d1d1d; font-size: calc(var(--unit) * 26);
+    font-weight: 700; line-height: calc(var(--unit) * 39);
+}
+.pacs-login-label {
+    left: calc(var(--unit) * 40);
+    color: #333; font-size: calc(var(--unit) * 12);
+    font-weight: 500; line-height: calc(var(--unit) * 18);
+}
+.pacs-login-id-label { top: calc(var(--unit) * 103); }
+.pacs-login-password-label { top: calc(var(--unit) * 198); }
+.pacs-login-field {
+    left: calc(var(--unit) * 40);
+    width: calc(var(--unit) * 380); height: calc(var(--unit) * 48);
+    border: max(1px, calc(var(--unit) * 1)) solid #d3d3d3;
+    border-radius: calc(var(--unit) * 4); background: #fff;
+}
+.pacs-login-id-field { top: calc(var(--unit) * 130); }
+.pacs-login-password-field { top: calc(var(--unit) * 225); }
+.pacs-login-field input {
+    width: 100%; height: 100%; padding: 0 calc(var(--unit) * 14);
+    border: 0; outline: 0; background: transparent;
+    color: #1d1d1d; font: 400 calc(var(--unit) * 13) 'Noto Sans KR', sans-serif;
+}
+.pacs-login-field input::placeholder { color: #767676; opacity: 1; }
+.pacs-login-field:focus-within { border-color: #555; }
+.pacs-login-password-field input { padding-right: calc(var(--unit) * 65); }
+.pacs-login-show {
+    position: absolute; right: calc(var(--unit) * 14); top: 0;
+    height: 100%; display: flex; align-items: center;
+    color: #555; font-size: calc(var(--unit) * 11);
+    font-weight: 500; line-height: calc(var(--unit) * 17);
+    padding: 0; border: 0; background: transparent; cursor: pointer;
+    font-family: inherit;
+}
+.pacs-login-remember {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 297);
+    height: calc(var(--unit) * 20); display: flex; align-items: center;
+    gap: calc(var(--unit) * 8); color: #555;
+    font-size: calc(var(--unit) * 12); line-height: calc(var(--unit) * 18);
+}
+.pacs-login-remember-box {
+    width: calc(var(--unit) * 16); height: calc(var(--unit) * 16);
+    border: max(1px, calc(var(--unit) * 1)) solid #b3b3b3;
+    border-radius: calc(var(--unit) * 3); background: #fff;
+}
+.pacs-login-remember { cursor: pointer; }
+.pacs-login-remember-input {
+    position: absolute; width: calc(var(--unit) * 16);
+    height: calc(var(--unit) * 16); margin: 0; opacity: 0;
+}
+.pacs-login-remember-input:focus-visible + .pacs-login-remember-box {
+    outline: 2px solid #555; outline-offset: 2px;
+}
+.pacs-login-remember-input:checked + .pacs-login-remember-box {
+    border-color: #252525; background: #252525;
+}
+.pacs-login-remember-input:checked + .pacs-login-remember-box::after {
+    content: ''; display: block;
+    width: 40%; height: 65%;
+    margin: 5% auto 0;
+    border: solid #fff; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+.pacs-login-forgot {
+    right: calc(var(--unit) * 40); top: calc(var(--unit) * 298);
+    color: #555; font-size: calc(var(--unit) * 12);
+    font-weight: 500; line-height: calc(var(--unit) * 18);
+    padding: 0; border: 0; background: transparent; cursor: pointer;
+    font-family: inherit;
+}
+.pacs-login-button {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 340);
+    width: calc(var(--unit) * 380); height: calc(var(--unit) * 48);
+    display: flex; align-items: center; justify-content: center;
+    border-radius: calc(var(--unit) * 4); background: #252525;
+    color: #fff; font-size: calc(var(--unit) * 14);
+    font-weight: 500; line-height: calc(var(--unit) * 21);
+    border: 0; padding: 0; cursor: pointer; font-family: inherit;
+}
+.pacs-login-button:hover { background: #353535; }
+.pacs-login-button:disabled { cursor: wait; }
+.pacs-login-feedback {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 392);
+    width: calc(var(--unit) * 380);
+    color: #b42318; font-size: calc(var(--unit) * 10);
+    line-height: calc(var(--unit) * 16);
+}
+.pacs-login-feedback[data-kind="info"] { color: #555; }
+.pacs-login-privacy {
+    left: calc(var(--unit) * 40); top: calc(var(--unit) * 412);
+    width: calc(var(--unit) * 380); height: calc(var(--unit) * 84);
+    padding: calc(var(--unit) * 14) calc(var(--unit) * 16);
+    border-radius: calc(var(--unit) * 4); background: #f7f7f7;
+    color: #696969; font-size: calc(var(--unit) * 11);
+    line-height: calc(var(--unit) * 17);
+}
+.pacs-login-privacy strong {
+    display: block; margin-bottom: calc(var(--unit) * 4);
+    color: #444; font-weight: 500;
+}
+.pacs-login-contact {
+    top: calc(var(--unit) * 798); left: 0; width: 100%;
+    color: #696969; font-size: calc(var(--unit) * 11);
+    line-height: calc(var(--unit) * 17); text-align: center;
+}
+.pacs-login-footer-rule {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 852);
+    right: calc(var(--unit) * 54); height: max(1px, calc(var(--unit) * 1));
+    background: #e2e2e2;
+}
+.pacs-login-footer-name, .pacs-login-policy, .pacs-login-help {
+    top: calc(var(--unit) * 878);
+    font-size: calc(var(--unit) * 11); line-height: calc(var(--unit) * 17);
+}
+.pacs-login-footer-name { left: calc(var(--unit) * 48); color: #696969; }
+.pacs-login-policy { right: calc(var(--unit) * 165); color: #555; font-weight: 500; }
+.pacs-login-help { right: calc(var(--unit) * 77); color: #555; }
+.pacs-login-footer-note {
+    left: calc(var(--unit) * 48); top: calc(var(--unit) * 905);
+    color: #707070; font-size: calc(var(--unit) * 10);
+    line-height: calc(var(--unit) * 15);
+}
