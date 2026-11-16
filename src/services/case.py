@@ -2,6 +2,7 @@
 from src.repositories.case import save_case
 from src.repositories.patient import patient_exists
 from src.repositories.department import department_exists
+from src.services.access_policy import require_case_registration
 
 def create_case(
     patient_id: str,
@@ -10,6 +11,11 @@ def create_case(
     exam_info: str,
     created_by: str,
 ) -> str:
+
+    # 등록 권한 검사
+    created_by = created_by.strip()
+    require_case_registration(created_by)
+
     # 필수 항목 조사
     required_fields = {
         "환자" : patient_id,
@@ -17,6 +23,7 @@ def create_case(
         "검사 종류" : exam_type,
         "등록자" : created_by
     }
+    
     #필수 항목 미포함 시 ValueError
     for name, value in required_fields.items():
         if not value or not value.strip():
