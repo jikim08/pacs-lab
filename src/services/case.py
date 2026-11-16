@@ -1,8 +1,8 @@
-'''케이스 등록 규칙 처리 및 repositories에 등록 요청'''
-from src.repositories.case import save_case
+'''케이스 등록·조회 규칙 처리 및 repositories에 요청'''
+from src.repositories.case import save_case, list_cases, get_case
 from src.repositories.patient import patient_exists
 from src.repositories.department import department_exists
-from src.services.access_policy import require_case_registration
+from src.services.access_policy import require_case_registration, require_case_read
 
 def create_case(
     patient_id: str,
@@ -51,3 +51,30 @@ def create_case(
 
     #repositories에 저장 요청
     return save_case(case_data)
+
+
+# 케이스 목록 조회
+# 결과가 없으면 빈 리스트 반환 - 화면에서 빈 목록 안내
+def get_case_list(uid: str, limit: int = 50) -> list[dict]:
+    require_case_read(uid)
+
+    if limit <= 0:
+        raise ValueError("조회 개수는 1 이상이어야 합니다.")
+
+    return list_cases(limit)
+
+
+# 케이스 상세 조회 
+# 없는 케이스는 LookupError
+def get_case_detail(uid: str, case_id: str) -> dict:
+    require_case_read(uid)
+
+    if not case_id or not case_id.strip():
+        raise ValueError("케이스 ID가 필요합니다.")
+
+    case = get_case(case_id.strip())
+
+    if case is None:
+        raise LookupError("존재하지 않는 케이스입니다.")
+
+    return case
