@@ -4,6 +4,26 @@ import requests
 from firebase_admin import auth
 from src.config import get_db
 
+def verify_token(id_token: str) -> dict:
+    if not id_token:
+        raise PermissionError("로그인이 필요합니다.")
+    get_db()
+
+    try:
+        decode = auth.verify_id_token(
+            id_token,
+            check_revoked= True,
+        )
+    except (ValueError, auth.InvalidIdTokenError, auth.UserDisabledError):
+        raise PermissionError(
+            "인증이 만료되었거나 유효하지 않습니다. 다시 로그인하세요."
+        ) from None
+
+    return {
+        "uid": decode["uid"],
+        "email": decode.get("email",""),
+    }
+
 def sign_in(email: str, password: str) -> dict:
     if not email or not email.strip() or not password:
         raise ValueError("이메일과 비밀번호를 입력하세요.")
@@ -54,17 +74,11 @@ def sign_in(email: str, password: str) -> dict:
     if not id_token:
         raise RuntimeError("로그인 응답에 인증 토큰이 없습니다.")
 
-    get_db()
-
-    # 3. 토큰을 검증하고 인증된 UID 확인
-    try:
-        decoded = auth.verify_id_token(id_token, check_revoked=True)
-    except (auth.InvalidIdTokenError, auth.UserDisabledError):
-        raise PermissionError("유효하지 않은 인증 정보입니다.") from None
+    user = verify_token(id_token)
 
     return {
-        "uid": decoded["uid"],
-        "email": decoded.get("email", ""),
+        "uid": user["uid"],
+        "email": user["email"],
         "id_token": id_token,
     }
 
