@@ -1,3 +1,5 @@
+'''진료과 정보 조회'''
+
 from src.config import get_db
 
 def department_exists(department_id: str) -> bool:
