@@ -1,6 +1,8 @@
 from src.repositories.user import get_user
 from src.auth.firebase_auth import verify_token
 
+from src.models import Case, CaseAssignment
+
 # 사용자 권한 확인
 def require_case_registration(user_id: str) -> None:
     user = get_user(user_id)
@@ -46,3 +48,37 @@ def get_current_user(id_token: str) -> dict:
         "name": profile.get("name", ""),
         "role": profile["role"],
     }
+
+def require_case_access(
+    uid: str,
+    case: Case,
+    assignment: CaseAssignment | None,
+) -> None:
+    """특정 케이스의 조회 권한을 검사한다.
+
+    사용자 역할과 담당 범위를 함께 확인한다.
+    """
+    raise NotImplementedError
+
+
+def require_case_processing(
+    uid: str,
+    case: Case,
+    assignment: CaseAssignment | None,
+) -> None:
+    """해당 케이스의 영상 처리 권한을 검사한다."""
+    raise NotImplementedError
+
+
+def require_case_review(
+    uid: str,
+    case: Case,
+    assignment: CaseAssignment | None,
+) -> None:
+    """해당 케이스의 검토 작업 권한을 검사한다."""
+    raise NotImplementedError
+
+
+def require_case_assignment(uid: str) -> None:
+    """담당자를 배정하거나 변경할 권한을 검사한다."""
+    raise NotImplementedError

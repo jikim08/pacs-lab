@@ -2,6 +2,8 @@
 from google.cloud import firestore
 
 from src.firebase_client import get_db
+from src.models import Case, CaseAssignment
+from src.models import CaseStatus
 
 # DB에 케이스 데이터 저장
 def save_case(case_data:dict) -> str:
@@ -44,3 +46,38 @@ def get_case(case_id: str) -> dict | None:
         return None
 
     return {"case_id": document.id, **document.to_dict()}
+
+def get_case_assignment(
+    case_id: str,
+) -> CaseAssignment | None:
+    """현재 담당자 정보를 조회한다.
+
+    미배정 상태이면 None을 반환한다.
+    """
+    raise NotImplementedError
+
+
+def save_case_assignment(
+    assignment: CaseAssignment,
+) -> None:
+    """현재 담당자 정보를 저장한다.
+
+    같은 케이스의 기존 배정이 있으면 교체한다.
+    배정 권한과 재배정 가능 여부는 서비스에서 검사한다.
+    """
+    raise NotImplementedError
+
+
+def update_case_status(
+    case_id: str,
+    expected_status: CaseStatus,
+    new_status: CaseStatus,
+) -> None:
+    """현재 상태를 확인한 뒤 새 상태와 수정 시간을 저장한다.
+
+    현재 상태 확인과 갱신은 트랜잭션에서 함께 수행한다.
+
+    케이스 없음: NotFoundError
+    현재 상태가 expected_status와 다름: ConflictError
+    """
+    raise NotImplementedError
