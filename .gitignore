@@ -29,6 +29,7 @@ credentials/
 data/uploads/
 data/results/
 data/tmp/
+data/storage
 tmp/
 temp/
 
