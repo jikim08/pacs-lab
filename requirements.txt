@@ -1,0 +1,7 @@
+streamlit
+firebase-admin
+requests
+python-dotenv
+numpy
+opencv-python-headless
+Pillow

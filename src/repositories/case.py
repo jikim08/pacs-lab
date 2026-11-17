@@ -1,7 +1,7 @@
 '''케이스를 DB에 저장 및 조회'''
 from google.cloud import firestore
 
-from src.config import get_db
+from src.firebase_client import get_db
 
 # DB에 케이스 데이터 저장
 def save_case(case_data:dict) -> str:

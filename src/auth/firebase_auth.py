@@ -2,7 +2,7 @@ import os
 
 import requests
 from firebase_admin import auth
-from src.config import get_db
+from src.firebase_client import get_db
 
 def verify_token(id_token: str) -> dict:
     if not id_token:

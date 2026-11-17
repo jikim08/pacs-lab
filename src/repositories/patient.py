@@ -1,6 +1,6 @@
 '''모의 환자 정보 조회'''
 
-from src.config import get_db
+from src.firebase_client import get_db
 
 # DB에 환자 존재 확인
 def patient_exists(patient_id: str) -> bool:
