@@ -1,1 +1,927 @@
-'''케이스 목록, 검색, 필터'''
+"""PACS 검사 목록 화면.
+
+화면 요소와 입력 처리는 Streamlit 위젯으로 구성하고, 모양은 Figma 디자인(1440×960 기준)을 CSS로 맞춥니다.
+검사 데이터는 지금은 화면 확인용 샘플 1건을 사용합니다. 백엔드가 준비되면 ``load_exams``만 바꾸면 됩니다.
+
+app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
+다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있습니다.
+"""
+
+from __future__ import annotations
+
+import base64
+import html
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+
+import streamlit as st
+
+_logger = logging.getLogger(__name__)
+
+# 한국 시간(UTC+9). 서버 시간이 UTC여도 화면에는 한국 시간을 표시합니다. 한국은 서머타임이 없습니다.
+KST = timezone(timedelta(hours=9), "KST")
+
+# ── 업무 규칙 ────────────────────────────────────────────────────────────────
+
+STATUS_UNASSIGNED = "미배정"
+STATUS_ASSIGNED = "배정 완료"
+STATUS_DONE = "판독 완료"
+STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_DONE)
+
+# 수정할 수 있는 상태입니다. 배정 완료 검사도 수정하게 하려면 STATUS_ASSIGNED를 추가하면 됩니다.
+EDITABLE_STATUSES = frozenset({STATUS_UNASSIGNED})
+REGISTRAR_ROLE = "registrar"
+
+MODALITY_OPTIONS = ("CT", "MR", "CR", "US")
+ALL = "전체"
+DEFAULT_RANGE_DAYS = 7  # 검사일 기본값: 오늘을 포함한 최근 7일
+
+# ── 안내 문구 (디자인 확정 전 임시 문구) ──────────────────────────────────────────
+
+MSG_NO_RESULT = "조건에 맞는 검사가 없습니다. 검색 조건을 변경해 보세요."
+MSG_NO_SELECTION = "목록에서 검사를 선택하면 상세 정보가 표시됩니다."
+MSG_LOAD_FAILED = "검사 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+MSG_EDIT_NOT_ALLOWED = "본인이 등록한 미배정 검사만 수정할 수 있습니다."
+MSG_INVALID_DATES = "검사일 시작일이 종료일보다 늦을 수 없습니다."
+
+# ── 세션 상태 키 ─────────────────────────────────────────────────────────────
+
+_APPLIED_FILTER_KEY = "_pacs_list_applied_filter"
+_FILTER_VERSION_KEY = "_pacs_list_filter_version"
+_SELECTED_KEY = "_pacs_list_selected_case"
+_EVENT_KEY = "_pacs_list_event"
+_NOTICE_KEY = "_pacs_list_notice"
+
+
+# ── 데이터 형식 ──────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CurrentUser:
+    """화면에 필요한 로그인 사용자 정보."""
+
+    uid: str
+    role: str  # "registrar" | "reviewer" | "manager" (대소문자 구분 없음)
+    name: str
+    department: str
+
+
+@dataclass(frozen=True)
+class ExamRecord:
+    """검사 목록 한 줄과 상세 패널에 표시할 정보."""
+
+    case_id: str
+    accession_no: str
+    patient_id: str
+    patient_name: str
+    patient_sex: str  # "남" / "여"
+    patient_age: int | None
+    modality: str  # CT, MR, CR, US ...
+    exam_name: str
+    exam_at: datetime | None  # 검사 시각. 없으면 등록 시각으로 기간을 판단합니다.
+    registered_at: datetime
+    status: str  # STATUS_OPTIONS 중 하나
+    department: str  # 의뢰과
+    created_by: str  # 등록자 UID
+
+
+@dataclass(frozen=True)
+class SearchFilter:
+    query: str
+    start: date
+    end: date
+    modality: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ExamListEvent:
+    """사용자가 다른 화면으로 이동하려 할 때 render가 돌려주는 값."""
+
+    kind: str  # "open_viewer" | "edit" | "navigate" | "logout"
+    case_id: str | None = None
+    target: str | None = None  # navigate 대상: "case_register" | "review_assign"
+
+
+# ── 데이터 불러오기 ──────────────────────────────────────────────────────────
+
+_PREVIEW_USER = CurrentUser(uid="preview-registrar", role=REGISTRAR_ROLE, name="김의사", department="영상의학과")
+
+
+def load_exams() -> list[ExamRecord]:
+    """검사 목록을 불러옵니다. 지금은 화면 확인용 샘플 1건을 돌려줍니다.
+
+    백엔드를 연결할 때 서비스의 목록 조회 결과를 ExamRecord로 바꿔 돌려주도록 이 함수만 수정합니다.
+    """
+    today = datetime.now(KST).replace(hour=10, minute=38, second=0, microsecond=0)
+    return [
+        ExamRecord(
+            case_id="sample-0481",
+            accession_no=f"ACC-{today:%Y%m%d}-0481",
+            patient_id="P2600481",
+            patient_name="김민준",
+            patient_sex="남",
+            patient_age=58,
+            modality="CT",
+            exam_name="Chest CT (Contrast)",
+            exam_at=today,
+            registered_at=today,
+            status=STATUS_ASSIGNED,
+            department="응급의학과",
+            created_by=_PREVIEW_USER.uid,
+        )
+    ]
+
+
+# ── 검색·정렬·권한 ───────────────────────────────────────────────────────────
+
+def _today() -> date:
+    return datetime.now(KST).date()
+
+
+def default_filter() -> SearchFilter:
+    today = _today()
+    return SearchFilter("", today - timedelta(days=DEFAULT_RANGE_DAYS - 1), today, ALL, ALL)
+
+
+def filter_exams(exams: list[ExamRecord], condition: SearchFilter) -> list[ExamRecord]:
+    """검색 조건을 모두 만족하는 검사를 검사 시간 최신순으로 돌려줍니다."""
+    query = condition.query.strip().lower()
+    matched = []
+    for exam in exams:
+        if query and query not in exam.patient_name.lower() and query not in exam.patient_id.lower():
+            continue
+        exam_day = (exam.exam_at or exam.registered_at).astimezone(KST).date()
+        if not condition.start <= exam_day <= condition.end:
+            continue
+        if condition.modality != ALL and exam.modality != condition.modality:
+            continue
+        if condition.status != ALL and exam.status != condition.status:
+            continue
+        matched.append(exam)
+    # 최근 검사가 위로. 검사 시간이 없는 검사는 맨 아래로 보냅니다.
+    return sorted(matched, key=lambda e: (e.exam_at is None, -(e.exam_at.timestamp() if e.exam_at else 0)))
+
+
+def is_registrar(user: CurrentUser) -> bool:
+    return user.role.strip().lower() == REGISTRAR_ROLE
+
+
+def can_edit(user: CurrentUser, exam: ExamRecord) -> bool:
+    """등록 담당자가 본인이 등록한, 수정 가능한 상태의 검사일 때만 수정할 수 있습니다."""
+    return is_registrar(user) and exam.created_by == user.uid and exam.status in EDITABLE_STATUSES
+
+
+# ── 아이콘 (Figma에서 받은 SVG) ──────────────────────────────────────────────
+
+def _svg(width: float, height: float, body: str) -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" fill="none">{body}</svg>'
+    )
+
+
+_STROKE = 'stroke-linecap="round" stroke-linejoin="round"'
+_ICON_LIST = _svg(20, 20, (
+    f'<path d="M5 2.5H15C15.9205 2.5 16.6667 3.24619 16.6667 4.16667V15.8333C16.6667 16.7538 15.9205 17.5 15 17.5H5'
+    f'C4.07953 17.5 3.33333 16.7538 3.33333 15.8333V4.16667C3.33333 3.24619 4.07953 2.5 5 2.5Z" '
+    f'stroke-width="1.6" {_STROKE} stroke="#202020"/>'
+    f'<path d="M6.66667 6.66667H13.3333M6.66667 10H13.3333M6.66667 13.3333H10.8333" '
+    f'stroke-width="1.6" {_STROKE} stroke="#202020"/>'
+))
+# 문서(14×16)와 더하기(6×6)를 Figma 배치대로 20×20 한 장에 합칩니다.
+_ICON_REGISTER = _svg(20, 20, (
+    '<g transform="translate(3 2)">'
+    f'<path d="M8.25 0.75H2.25C1.85218 0.75 1.47064 0.908035 1.18934 1.18934C0.908035 1.47064 0.75 1.85218 0.75 2.25'
+    f'V13.75C0.75 14.1478 0.908035 14.5294 1.18934 14.8107C1.47064 15.092 1.85218 15.25 2.25 15.25H11.75'
+    f'C12.1478 15.25 12.5294 15.092 12.8107 14.8107C13.092 14.5294 13.25 14.1478 13.25 13.75V5.75L8.25 0.75Z" '
+    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/>'
+    f'<path d="M8.25 0.75V4.75C8.25 5.01522 8.35536 5.26957 8.54289 5.45711C8.73043 5.64464 8.98478 5.75 9.25 5.75'
+    f'H13.25" stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/></g>'
+    '<g transform="translate(7 9.25)"><path d="M3 0.75V5.25M0.75 3H5.25" stroke-width="1.5" '
+    'stroke-linecap="round" stroke="#C1C1C1"/></g>'
+))
+# 사람(10.5×15.75)과 체크(6.5×4.75)를 Figma 배치대로 합칩니다.
+_ICON_REVIEW = _svg(20, 20, (
+    '<g transform="translate(2 2.25)">'
+    f'<path d="M8.25 3.75C8.25 5.40685 6.90685 6.75 5.25 6.75C3.59315 6.75 2.25 5.40685 2.25 3.75'
+    f'C2.25 2.09315 3.59315 0.75 5.25 0.75C6.90685 0.75 8.25 2.09315 8.25 3.75Z" '
+    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/>'
+    f'<path d="M0.75 15V13.25C0.75 12.1891 1.17143 11.1717 1.92157 10.4216C2.67172 9.67143 3.68913 9.25 4.75 9.25'
+    f'H5.75C6.81087 9.25 7.82828 9.67143 8.57843 10.4216C9.32857 11.1717 9.75 12.1891 9.75 13.25V15" '
+    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/></g>'
+    f'<g transform="translate(11.5 7)"><path d="M0.75 2L2.75 4L5.75 0.750004" stroke-width="1.5" '
+    f'{_STROKE} stroke="#C1C1C1"/></g>'
+))
+_ICON_SHIELD = _svg(18, 18, (
+    f'<path d="M9 2.25L15 4.5V9C15 12.75 9 15.75 9 15.75C9 15.75 3 12.75 3 9V4.5L9 2.25Z" '
+    f'stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
+    f'<path d="M6 9L8.25 11.25L12 6.75" stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
+))
+_ICON_CHEVRON_RIGHT = _svg(16, 16, f'<path d="M6 4L10 8L6 12" stroke-width="1.6" {_STROKE} stroke="#999999"/>')
+_ICON_LOGOUT = _svg(16, 16, (
+    '<path d="M7.5 2.5H2.5V13.5H7.5M7.5 8H13.5M10.5 11L13.5 8L10.5 5" stroke-width="1.6" stroke="#555555"/>'
+))
+_ICON_SEARCH_FIELD = _svg(18, 18, (
+    f'<path d="M12.75 7.875C12.75 10.5674 10.5674 12.75 7.875 12.75C5.18261 12.75 3 10.5674 3 7.875'
+    f'C3 5.18261 5.18261 3 7.875 3C10.5674 3 12.75 5.18261 12.75 7.875Z" stroke-width="1.6" {_STROKE} stroke="#555555"/>'
+    f'<path d="M12 12L15 15" stroke-width="1.6" {_STROKE} stroke="#555555"/>'
+))
+_ICON_CALENDAR = _svg(18, 18, (
+    f'<path d="M3.75 3.75H14.25C15.0784 3.75 15.75 4.42157 15.75 5.25V14.25C15.75 15.0784 15.0784 15.75 14.25 15.75'
+    f'H3.75C2.92157 15.75 2.25 15.0784 2.25 14.25V5.25C2.25 4.42157 2.92157 3.75 3.75 3.75Z" '
+    f'stroke-width="1.6" {_STROKE} stroke="#555555"/>'
+    f'<path d="M5.25 2.25V5.25M12.75 2.25V5.25M2.25 8.25H15.75" stroke-width="1.6" {_STROKE} stroke="#555555"/>'
+))
+_ICON_CHEVRON_DOWN = _svg(18, 18, f'<path d="M5.25 7.5L9 11.25L12.75 7.5" stroke-width="1.6" {_STROKE} stroke="#555555"/>')
+_ICON_SEARCH_BUTTON = _svg(18, 18, (
+    '<path d="M11.5355 10.8293L15 15.7062M13 7.29378C13 8.61987 12.4732 9.89164 11.5355 10.8293'
+    'C10.5979 11.767 9.32608 12.2938 8 12.2938C6.67392 12.2938 5.40215 11.767 4.46447 10.8293'
+    'C3.52678 9.89164 3 8.61987 3 7.29378C3 5.9677 3.52678 4.69593 4.46447 3.75825C5.40215 2.82057 6.67392 2.29378 8 2.29378'
+    'C9.32608 2.29378 10.5979 2.82057 11.5355 3.75825C12.4732 4.69593 13 5.9677 13 7.29378Z" '
+    'stroke-width="1.6" stroke="#555555"/>'
+))
+
+
+def _css_icon(svg: str) -> str:
+    """CSS background-image에 넣을 수 있는 data URI를 만듭니다."""
+    return "url('data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii") + "')"
+
+
+# ── 화면 배치 CSS ────────────────────────────────────────────────────────────
+# 모든 크기는 화면 높이에 비례하는 --u(= 화면 높이 / 960) 단위이고, 좌표는 Figma 레이어 값을 그대로 씁니다.
+# 화면이 디자인(1440)보다 넓으면 본문과 표 너비가 늘어나고, 오른쪽 요소는 오른쪽 끝을 기준으로 붙습니다.
+
+_STYLE = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
+
+html, body, .stApp, .stMain { background:#f6f6f6 !important; }
+[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"],
+[data-testid="stSidebar"], #MainMenu, footer { display:none !important; }
+.stMainBlockContainer { max-width:none !important; padding:0 !important; margin:0 !important; }
+
+.st-key-pacs_list_stage {
+  --u:calc(100vh / 960);
+  position:fixed !important; inset:0; z-index:1; overflow:hidden;
+  background:#f6f6f6; color:#222; font-family:'Noto Sans KR', sans-serif; font-weight:400;
+}
+.st-key-pacs_list_stage * { box-sizing:border-box; }
+.st-key-pacs_list_stage [data-testid="stVerticalBlock"],
+.st-key-pacs_list_stage [data-testid="stHorizontalBlock"] { gap:0 !important; }
+.st-key-pacs_list_stage [data-testid="stElementContainer"] { margin:0 !important; }
+.st-key-pacs_list_stage [data-testid="stMarkdown"],
+.st-key-pacs_list_stage [data-testid="stMarkdownContainer"],
+.st-key-pacs_list_stage [data-testid="stMarkdownContainer"] p {
+  margin:0 !important; padding:0 !important; font-family:inherit; font-size:inherit;
+  font-weight:inherit; line-height:inherit; letter-spacing:normal; color:inherit;
+}
+.st-key-pacs_list_stage button { font-family:inherit !important; }
+.st-key-pacs_list_stage [data-testid="stButtonShortcut"], .st-key-pacs_list_stage kbd { display:none !important; }
+
+.pacs-abs { position:absolute; white-space:nowrap; }
+
+/* 절대 좌표로 배치하는 블록 */
+.st-key-pacs_list_sidebar, .st-key-pacs_list_header, .st-key-pacs_list_main,
+.st-key-pacs_list_menu_list, .st-key-pacs_list_menu_register, .st-key-pacs_list_menu_review,
+.st-key-pacs_list_clock, .st-key-pacs_list_logout, .st-key-pacs_list_title,
+.st-key-pacs_list_stats, .st-key-pacs_list_filters, .st-key-pacs_list_count,
+.st-key-pacs_list_table, .st-key-pacs_list_detail, .st-key-pacs_list_edit, .st-key-pacs_list_viewer {
+  position:absolute !important;
+}
+
+/* ── 사이드바 (204 × 화면 높이) ── */
+.st-key-pacs_list_sidebar {
+  left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919;
+}
+.pacs-sidebar { position:relative; width:100%; height:100vh; color:#fff; }
+.pacs-logo {
+  left:calc(24 * var(--u)); top:calc(26 * var(--u)); width:calc(28 * var(--u)); height:calc(28 * var(--u));
+  border-radius:calc(6 * var(--u));
+  background:
+    linear-gradient(#191919, #191919) center / calc(16 * var(--u)) calc(4 * var(--u)) no-repeat,
+    linear-gradient(#191919, #191919) center / calc(4 * var(--u)) calc(16 * var(--u)) no-repeat,
+    #f4f4f4;
+}
+.pacs-brand { left:calc(63 * var(--u)); top:calc(24 * var(--u)); font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700; }
+.pacs-brand-sub { left:calc(24 * var(--u)); top:calc(67 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
+.pacs-side-line { left:calc(20 * var(--u)); top:calc(111 * var(--u)); width:calc(164 * var(--u)); height:1px; background:#363636; }
+.pacs-workspace { left:calc(24 * var(--u)); top:calc(137 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a; }
+.pacs-server {
+  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)); height:calc(65 * var(--u));
+  border-radius:calc(6 * var(--u)); background:#252525;
+}
+.pacs-server-icon { left:calc(12 * var(--u)); top:calc(11 * var(--u)); width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat; }
+.pacs-server-title { left:calc(38 * var(--u)); top:calc(11 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7; }
+.pacs-server-sub { left:calc(12 * var(--u)); top:calc(36 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
+.pacs-version { left:calc(24 * var(--u)); top:calc(927 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e; white-space:pre; }
+
+/* 메뉴 버튼: 180×44, 아이콘 (14, 12), 글자 x 46 */
+.st-key-pacs_list_menu_list, .st-key-pacs_list_menu_register, .st-key-pacs_list_menu_review {
+  left:calc(12 * var(--u)); width:calc(180 * var(--u)) !important; height:calc(44 * var(--u));
+}
+.st-key-pacs_list_menu_list { top:calc(174 * var(--u)); }
+.st-key-pacs_list_menu_register { top:calc(226 * var(--u)); }
+.st-key-pacs_list_menu_review { top:calc(278 * var(--u)); }
+.st-key-pacs_list_sidebar [data-testid="stButton"], .st-key-pacs_list_sidebar [data-testid="stButton"] button {
+  width:100% !important; height:calc(44 * var(--u)) !important; min-height:0 !important;
+}
+.st-key-pacs_list_sidebar [data-testid="stButton"] button {
+  justify-content:flex-start !important; padding:0 0 0 calc(46 * var(--u)) !important;
+  border:0 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
+  background-color:transparent !important; background-repeat:no-repeat !important;
+  background-position:calc(14 * var(--u)) center !important; background-size:calc(20 * var(--u)) !important;
+}
+.st-key-pacs_list_sidebar [data-testid="stButton"] button > div { width:100%; justify-content:flex-start !important; }
+.st-key-pacs_list_sidebar [data-testid="stButton"] button p {
+  font-size:calc(14 * var(--u)) !important; line-height:calc(21 * var(--u)) !important; color:#c1c1c1 !important;
+}
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_list button { background-color:#f2f2f2 !important; background-image:@ICON_LIST@ !important; }
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_list button p { color:#202020 !important; font-weight:700 !important; }
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_register button { background-image:@ICON_REGISTER@ !important; }
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_review button { background-image:@ICON_REVIEW@ !important; }
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_register button:hover,
+.st-key-pacs_list_sidebar .st-key-pacs_list_menu_review button:hover { background-color:#242424 !important; }
+
+/* ── 상단 바 (64 높이) ── */
+.st-key-pacs_list_header {
+  left:calc(204 * var(--u)); right:0; top:0; height:calc(64 * var(--u));
+  width:auto !important; background:#fff; border-bottom:1px solid #e5e5e5;
+}
+.pacs-header { position:relative; width:100%; height:calc(63 * var(--u)); }
+.pacs-crumb { top:calc(23 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); }
+.pacs-crumb-home { left:calc(32 * var(--u)); color:#777; }
+.pacs-crumb-sep { left:calc(116 * var(--u)); top:calc(24 * var(--u)); width:calc(16 * var(--u)); height:calc(16 * var(--u)); background:@ICON_CHEVRON_RIGHT@ center / contain no-repeat; }
+.pacs-crumb-page { left:calc(143 * var(--u)); color:#222; font-weight:500; }
+.pacs-user-line { left:calc(100% - 278 * var(--u)); top:calc(21 * var(--u)); width:1px; height:calc(22 * var(--u)); background:#e5e5e5; }
+.pacs-user-dept { left:calc(100% - 242 * var(--u)); top:calc(15 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
+.pacs-user-name { left:calc(100% - 242 * var(--u)); top:calc(31 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#222; }
+.st-key-pacs_list_clock {
+  right:calc(303 * var(--u)); top:calc(23 * var(--u)); width:auto !important; text-align:right; white-space:nowrap;
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#666; font-variant-numeric:tabular-nums;
+}
+.pacs-clock { white-space:nowrap; }
+.st-key-pacs_list_logout { right:calc(31 * var(--u)); top:calc(18 * var(--u)); width:calc(28 * var(--u)) !important; height:calc(28 * var(--u)); }
+.st-key-pacs_list_logout button {
+  width:calc(28 * var(--u)) !important; height:calc(28 * var(--u)) !important; min-height:0 !important; padding:0 !important;
+  border:0 !important; border-radius:calc(4 * var(--u)) !important; box-shadow:none !important;
+  background:transparent @ICON_LOGOUT@ center / calc(16 * var(--u)) no-repeat !important;
+}
+.st-key-pacs_list_logout button:hover { background-color:#f2f2f2 !important; }
+.st-key-pacs_list_logout button p { font-size:0 !important; }
+
+/* ── 본문 (상단 바 아래, 사이드바 오른쪽) ── */
+.st-key-pacs_list_main {
+  left:calc(204 * var(--u)); right:0; top:calc(64 * var(--u)); bottom:0; width:auto !important;
+}
+.st-key-pacs_list_title { left:calc(32 * var(--u)); top:calc(25 * var(--u)); width:auto !important; }
+.pacs-title { font-size:calc(26 * var(--u)); line-height:calc(39 * var(--u)); font-weight:700; color:#1d1d1d; }
+.pacs-subtitle { margin:calc(5 * var(--u)) 0 0 1px; font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); color:#727272; }
+
+/* 통계 카드 4개: 280×88, 간격 17~18 */
+.st-key-pacs_list_stats { left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(110 * var(--u)); width:auto !important; }
+.pacs-stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:calc(17.33 * var(--u)); }
+.pacs-stat {
+  position:relative; height:calc(88 * var(--u)); background:#fff; border:1px solid #e1e1e1;
+  border-radius:calc(7 * var(--u)); overflow:hidden;
+}
+.pacs-stat-label { left:calc(17 * var(--u)); top:calc(12 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#626262; }
+.pacs-stat-value { left:calc(17 * var(--u)); top:calc(33 * var(--u)); font-size:calc(28 * var(--u)); line-height:calc(42 * var(--u)); font-weight:700; color:#222; }
+.pacs-stat-note { left:calc(107 * var(--u)); top:calc(53 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
+.pacs-stat-accent { left:-1px; top:calc(16 * var(--u)); width:3px; height:calc(54 * var(--u)); border-radius:1px; background:#333; }
+
+/* 검색 조건 줄: 라벨(11) + 입력칸(42), 칸 사이 16, 검색 버튼 앞 12 */
+.st-key-pacs_list_stage .st-key-pacs_list_filters {
+  left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(220 * var(--u)); width:auto !important;
+  flex-wrap:nowrap !important; align-items:flex-end !important; gap:calc(16 * var(--u)) !important;
+}
+.st-key-pacs_list_filters > div { flex:0 0 auto !important; width:auto !important; min-width:0 !important; }
+.st-key-pacs_list_filters > div:has(> .st-key-pacs_list_field_query) { flex:1 1 auto !important; }
+[class*="st-key-pacs_list_field_"] { gap:0 !important; }
+.st-key-pacs_list_field_query { width:100% !important; min-width:calc(200 * var(--u)) !important; }
+.st-key-pacs_list_field_dates { width:calc(280 * var(--u)) !important; }
+.st-key-pacs_list_field_modality { width:calc(202 * var(--u)) !important; }
+.st-key-pacs_list_field_status { width:calc(182 * var(--u)) !important; }
+.st-key-pacs_list_field_search { width:calc(68 * var(--u)) !important; }
+.st-key-pacs_list_filters > div:has(> .st-key-pacs_list_field_search) { margin-left:calc(-4 * var(--u)) !important; }
+.pacs-filter-label { margin-bottom:calc(5 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#666; }
+[class*="st-key-pacs_list_field_"] [data-testid="stTextInput"],
+[class*="st-key-pacs_list_field_"] [data-testid="stDateInput"],
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] { width:100% !important; }
+[class*="st-key-pacs_list_field_"] [data-testid="stTextInputRootElement"],
+[class*="st-key-pacs_list_field_"] [data-testid="stDateInputField"],
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] > div > div {
+  height:calc(42 * var(--u)) !important; min-height:0 !important;
+  background-color:#fff !important; border:1px solid #d7d7d7 !important; border-radius:calc(6 * var(--u)) !important;
+  box-shadow:none !important;
+}
+[class*="st-key-pacs_list_field_"] [data-testid="stTextInputRootElement"]:focus-within,
+[class*="st-key-pacs_list_field_"] [data-testid="stDateInputField"]:focus-within,
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] > div > div:focus-within { border-color:#555 !important; }
+[class*="st-key-pacs_list_field_"] [data-testid="stTextInputRootElement"] > div,
+[class*="st-key-pacs_list_field_"] [data-baseweb="base-input"] { background:transparent !important; }
+[class*="st-key-pacs_list_field_"] input {
+  height:100% !important; background:transparent !important; color:#444 !important; -webkit-text-fill-color:#444;
+  caret-color:#222; font-family:inherit !important; font-size:calc(12 * var(--u)) !important;
+}
+[class*="st-key-pacs_list_field_"] input::placeholder { color:#858585 !important; -webkit-text-fill-color:#858585; opacity:1; }
+[class*="st-key-pacs_list_field_"] [data-testid="InputInstructions"] { display:none !important; }
+/* 환자 검색 칸: 왼쪽 아이콘 (12, 11) 18×18, 글자는 x 40부터 */
+.st-key-pacs_list_field_query [data-testid="stTextInputRootElement"] {
+  background:#fff @ICON_SEARCH_FIELD@ calc(12 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
+}
+.st-key-pacs_list_field_query input { padding:0 calc(12 * var(--u)) 0 calc(39 * var(--u)) !important; }
+/* 검사일 칸: Streamlit 달력 버튼을 왼쪽으로 옮겨 디자인의 달력 아이콘으로 바꿉니다(누르면 달력이 열림). */
+.st-key-pacs_list_field_dates [data-testid="stDateInputField"] { align-items:center; padding:0 !important; }
+.st-key-pacs_list_field_dates [data-testid="stDateInputField"] > div:last-child {
+  order:-1; flex:0 0 auto; width:calc(39 * var(--u)) !important; height:100%; padding:0 !important;
+}
+.st-key-pacs_list_field_dates [data-testid="stDateInputCalendarButton"] {
+  width:100% !important; height:100% !important; padding:0 !important; border:0 !important; cursor:pointer;
+  background:transparent @ICON_CALENDAR@ calc(12 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
+}
+.st-key-pacs_list_field_dates [data-testid="stDateInputCalendarButton"] svg { display:none !important; }
+.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"],
+.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] * {
+  font-family:inherit !important; font-size:calc(12 * var(--u)) !important; color:#444 !important; letter-spacing:0 !important;
+}
+.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] > div { padding:0 !important; }
+.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] > span { padding:0 calc(8 * var(--u)) !important; }
+/* 선택 상자: 글자 x 13, 오른쪽 ▾ 아이콘 (13, 11) */
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] > div > div { display:flex; align-items:center; overflow:hidden; }
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] input {
+  flex:1 1 auto; min-width:0; padding:0 0 0 calc(13 * var(--u)) !important; cursor:pointer;
+}
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] button {
+  flex:0 0 auto; width:calc(44 * var(--u)) !important; height:100% !important; padding:0 !important; border:0 !important;
+  background:transparent @ICON_CHEVRON_DOWN@ right calc(13 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
+}
+[class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] button svg { display:none !important; }
+/* 검색 버튼: 68×42, 배경 #f7f7f7 */
+.st-key-pacs_list_field_search button {
+  width:100% !important; height:calc(42 * var(--u)) !important; min-height:0 !important; padding:0 !important;
+  border:1px solid #d7d7d7 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
+  background:#f7f7f7 @ICON_SEARCH_BUTTON@ center / calc(18 * var(--u)) no-repeat !important;
+}
+.st-key-pacs_list_field_search button:hover { background-color:#eee !important; }
+.st-key-pacs_list_field_search button p { font-size:0 !important; }
+
+/* 총 N건 · 적용된 검색 조건 */
+.st-key-pacs_list_count { left:calc(32 * var(--u)); top:calc(301 * var(--u)); width:auto !important; }
+.pacs-count { white-space:nowrap; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); }
+.pacs-count b { font-weight:700; color:#222; }
+.pacs-count span { margin-left:calc(8 * var(--u)); color:#858585; font-size:calc(11 * var(--u)); }
+
+/* ── 검사 표: 왼쪽 32, 오른쪽은 상세 패널(324) 앞 16 ── */
+.st-key-pacs_list_table {
+  left:calc(32 * var(--u)); right:calc(372 * var(--u)); top:calc(328 * var(--u)); height:calc(520 * var(--u));
+  width:auto !important; background:#fff; border:1px solid #dedede; border-radius:calc(7 * var(--u)); overflow:hidden;
+}
+.pacs-thead {
+  position:relative; height:calc(39 * var(--u)); background:#f8f8f8;
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#6d6d6d;
+}
+.pacs-thead .pacs-abs { top:calc(11 * var(--u)); }
+.st-key-pacs_list_rows {
+  flex:0 0 auto !important; min-height:0 !important; display:block !important;
+  height:calc(479 * var(--u)) !important; max-height:none !important; overflow-y:auto !important; overflow-x:hidden;
+  scrollbar-width:thin; scrollbar-color:#cfcfcf transparent;
+}
+[class*="st-key-pacs_list_row_"] { position:relative; height:calc(48 * var(--u)); flex:0 0 auto; }
+.pacs-row { position:relative; height:calc(48 * var(--u)); background:#fff; border-bottom:1px solid #ececec; }
+[class*="st-key-pacs_list_row_"]:hover .pacs-row:not(.is-selected) { background:#fafafa; }
+.pacs-row.is-selected { background:#eee; }
+.pacs-row.is-selected::before { content:''; position:absolute; left:0; top:0; width:3px; height:100%; background:#292929; }
+.pacs-c-name { top:calc(6 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#292929; }
+.pacs-c-meta { top:calc(25 * var(--u)); font-size:calc(9 * var(--u)); line-height:calc(14 * var(--u)); color:#7a7a7a; }
+.pacs-c-name, .pacs-c-meta { left:calc(28 * var(--u)); max-width:calc(108 * var(--u)); overflow:hidden; text-overflow:ellipsis; }
+.pacs-c-pid { left:calc(143 * var(--u)); top:calc(15 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#656565; }
+.pacs-c-mod {
+  left:calc(258 * var(--u)); top:calc(14 * var(--u)); width:calc(32 * var(--u)); height:calc(21 * var(--u));
+  display:flex; align-items:center; justify-content:center; border:1px solid #d9d9d9; border-radius:calc(3 * var(--u));
+  background:#f4f4f4; font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#555;
+}
+.pacs-c-exam {
+  left:calc(324 * var(--u)); right:calc(278 * var(--u)); top:calc(15 * var(--u)); overflow:hidden; text-overflow:ellipsis;
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#333;
+}
+.pacs-c-time { right:calc(228 * var(--u)); top:calc(15 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#666; font-variant-numeric:tabular-nums; }
+.pacs-c-status { right:calc(47 * var(--u)); top:calc(12 * var(--u)); }
+.pacs-h-time { right:calc(212 * var(--u)); }
+.pacs-h-status { right:calc(78 * var(--u)); }
+/* 줄 전체를 덮는 투명 선택 버튼 */
+[class*="st-key-pacs_list_row_"] [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
+  position:absolute !important; inset:0; z-index:2; width:100% !important; height:100% !important;
+}
+[class*="st-key-pacs_list_row_"] [data-testid="stButton"],
+[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button {
+  width:100% !important; height:100% !important; min-height:0 !important;
+}
+[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button {
+  padding:0 !important; border:0 !important; border-radius:0 !important; box-shadow:none !important;
+  background:transparent !important; cursor:pointer;
+}
+[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button p { font-size:0 !important; }
+[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button:focus-visible { outline:2px solid #555 !important; outline-offset:-2px; }
+.pacs-empty {
+  display:flex; align-items:center; justify-content:center; height:calc(479 * var(--u)); padding:0 calc(24 * var(--u));
+  text-align:center; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585; white-space:normal;
+}
+
+/* 상태 배지: 80×26 */
+.pacs-badge {
+  display:flex; align-items:center; justify-content:center; width:calc(80 * var(--u)); height:calc(26 * var(--u));
+  border-radius:calc(6 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(15 * var(--u)); white-space:nowrap;
+}
+.pacs-badge.is-done { background:#252525; color:#fff; }
+.pacs-badge.is-assigned { background:#f4f4f4; color:#222; font-weight:700; }
+.pacs-badge.is-unassigned { background:#fff; color:#666; border:1px solid #d8d8d8; }
+
+/* ── 검사 상세 패널: 324×520 ── */
+.st-key-pacs_list_detail {
+  right:calc(32 * var(--u)); top:calc(328 * var(--u)); width:calc(324 * var(--u)) !important; height:calc(520 * var(--u));
+  background:#fff; border:1px solid #dedede; border-radius:calc(7 * var(--u)); overflow:hidden;
+}
+.pacs-detail { position:relative; height:calc(518 * var(--u)); }
+.pacs-d-title { left:calc(19 * var(--u)); top:calc(14 * var(--u)); font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); font-weight:700; color:#333; }
+.pacs-d-line { left:calc(19 * var(--u)); width:calc(284 * var(--u)); height:1px; background:#e8e8e8; }
+.pacs-d-line.is-top { left:0; width:100%; top:calc(46 * var(--u)); background:#e5e5e5; }
+.pacs-d-name { left:calc(19 * var(--u)); top:calc(64 * var(--u)); max-width:calc(196 * var(--u)); overflow:hidden; text-overflow:ellipsis; font-size:calc(21 * var(--u)); line-height:calc(32 * var(--u)); font-weight:700; color:#222; }
+.pacs-d-badge { left:calc(223 * var(--u)); top:calc(71 * var(--u)); }
+.pacs-d-meta { left:calc(19 * var(--u)); top:calc(99 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; white-space:pre; }
+.pacs-d-label, .pacs-d-value { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); }
+.pacs-d-label { left:calc(19 * var(--u)); color:#7a7a7a; }
+.pacs-d-value { left:calc(98 * var(--u)); max-width:calc(205 * var(--u)); overflow:hidden; text-overflow:ellipsis; color:#333; white-space:pre; }
+.pacs-d-value.is-strong { font-weight:500; }
+.pacs-d-empty {
+  left:calc(19 * var(--u)); right:calc(19 * var(--u)); top:calc(47 * var(--u)); bottom:0; display:flex; align-items:center;
+  justify-content:center; text-align:center; white-space:normal; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
+}
+.st-key-pacs_list_edit { left:calc(242 * var(--u)); top:calc(11 * var(--u)); width:calc(67 * var(--u)) !important; height:calc(23 * var(--u)); }
+.st-key-pacs_list_viewer { left:calc(19 * var(--u)); top:calc(458 * var(--u)); width:calc(284 * var(--u)) !important; height:calc(41 * var(--u)); }
+.st-key-pacs_list_edit [data-testid="stElementContainer"], .st-key-pacs_list_viewer [data-testid="stElementContainer"],
+.st-key-pacs_list_edit [data-testid="stButton"], .st-key-pacs_list_viewer [data-testid="stButton"],
+.st-key-pacs_list_edit [data-testid="stButton"] > div, .st-key-pacs_list_edit [data-testid="stTooltipIcon"],
+.st-key-pacs_list_edit [data-testid="stTooltipHoverTarget"],
+.st-key-pacs_list_edit button, .st-key-pacs_list_viewer button { width:100% !important; height:100% !important; min-height:0 !important; }
+.st-key-pacs_list_edit button, .st-key-pacs_list_viewer button {
+  padding:0 !important; border:0 !important; border-radius:calc(5 * var(--u)) !important; box-shadow:none !important;
+  background:#252525 !important; color:#fff !important;
+}
+.st-key-pacs_list_edit button:hover:enabled, .st-key-pacs_list_viewer button:hover:enabled { background:#353535 !important; }
+.st-key-pacs_list_edit button:disabled { background:#cfcfcf !important; cursor:not-allowed; }
+.st-key-pacs_list_edit button p, .st-key-pacs_list_viewer button p {
+  color:#fff !important; font-size:calc(12 * var(--u)) !important; line-height:calc(18 * var(--u)) !important; font-weight:500;
+}
+.st-key-pacs_list_stage button:focus-visible { outline:2px solid #555 !important; outline-offset:2px; }
+</style>
+"""
+
+_STYLE = (
+    _STYLE.replace("@ICON_LIST@", _css_icon(_ICON_LIST))
+    .replace("@ICON_REGISTER@", _css_icon(_ICON_REGISTER))
+    .replace("@ICON_REVIEW@", _css_icon(_ICON_REVIEW))
+    .replace("@ICON_SHIELD@", _css_icon(_ICON_SHIELD))
+    .replace("@ICON_CHEVRON_RIGHT@", _css_icon(_ICON_CHEVRON_RIGHT))
+    .replace("@ICON_LOGOUT@", _css_icon(_ICON_LOGOUT))
+    .replace("@ICON_SEARCH_FIELD@", _css_icon(_ICON_SEARCH_FIELD))
+    .replace("@ICON_CALENDAR@", _css_icon(_ICON_CALENDAR))
+    .replace("@ICON_CHEVRON_DOWN@", _css_icon(_ICON_CHEVRON_DOWN))
+    .replace("@ICON_SEARCH_BUTTON@", _css_icon(_ICON_SEARCH_BUTTON))
+)
+
+
+# ── 이벤트 처리 (버튼 콜백) ──────────────────────────────────────────────────
+
+def _emit(kind: str, case_id: str | None = None, target: str | None = None) -> None:
+    st.session_state[_EVENT_KEY] = ExamListEvent(kind=kind, case_id=case_id, target=target)
+
+
+def _select(case_id: str) -> None:
+    st.session_state[_SELECTED_KEY] = case_id
+
+
+def _filter_key(name: str) -> str:
+    # 검색 후 필터 칸을 비우기 위해, 칸의 key에 버전 번호를 붙여 새 칸으로 다시 만듭니다.
+    return f"_pacs_list_{name}_{st.session_state.get(_FILTER_VERSION_KEY, 0)}"
+
+
+def _normalize_dates(value: object) -> tuple[date, date] | None:
+    if isinstance(value, date):
+        return value, value
+    if isinstance(value, (tuple, list)) and value:
+        start = value[0]
+        end = value[1] if len(value) > 1 else value[0]
+        if isinstance(start, date) and isinstance(end, date):
+            return start, end
+    return None
+
+
+def _on_search() -> None:
+    """현재 입력한 조건을 적용하고, 필터 칸은 기본값으로 되돌립니다."""
+    state = st.session_state
+    dates = _normalize_dates(state.get(_filter_key("dates")))
+    defaults = default_filter()
+    start, end = dates if dates else (defaults.start, defaults.end)
+    if start > end:
+        state[_NOTICE_KEY] = MSG_INVALID_DATES
+        return
+    state[_APPLIED_FILTER_KEY] = SearchFilter(
+        query=str(state.get(_filter_key("query")) or "").strip(),
+        start=start,
+        end=end,
+        modality=str(state.get(_filter_key("modality")) or ALL),
+        status=str(state.get(_filter_key("status")) or ALL),
+    )
+    state[_FILTER_VERSION_KEY] = state.get(_FILTER_VERSION_KEY, 0) + 1
+    state.pop(_SELECTED_KEY, None)
+
+
+# ── 화면 그리기 ──────────────────────────────────────────────────────────────
+
+def _esc(value: object) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _badge(status: str, extra_class: str = "") -> str:
+    kind = {STATUS_DONE: "is-done", STATUS_ASSIGNED: "is-assigned"}.get(status, "is-unassigned")
+    return f'<div class="pacs-badge {kind} {extra_class}">{_esc(status)}</div>'
+
+
+def _patient_meta(exam: ExamRecord) -> str:
+    age = f"{exam.patient_age}세" if exam.patient_age is not None else "-"
+    return f"{exam.patient_sex or '-'} · {age}"
+
+
+def _render_sidebar() -> None:
+    with st.container(key="pacs_list_sidebar"):
+        st.html(
+            '<div class="pacs-sidebar">'
+            '<div class="pacs-abs pacs-logo"></div>'
+            '<div class="pacs-abs pacs-brand">PACS</div>'
+            '<div class="pacs-abs pacs-brand-sub">의료영상 관리 시스템</div>'
+            '<div class="pacs-abs pacs-side-line"></div>'
+            '<div class="pacs-abs pacs-workspace">WORKSPACE</div>'
+            '<div class="pacs-abs pacs-server">'
+            '<div class="pacs-abs pacs-server-icon"></div>'
+            '<div class="pacs-abs pacs-server-title">서버 연결 정상</div>'
+            '<div class="pacs-abs pacs-server-sub">DICOM 서비스 운영 중</div>'
+            "</div>"
+            '<div class="pacs-abs pacs-version">PACS  /  v1.1</div>'
+            "</div>"
+        )
+        with st.container(key="pacs_list_menu_list"):
+            st.button("검사 목록", key="pacs_list_nav_list", width="stretch")
+        with st.container(key="pacs_list_menu_register"):
+            st.button("검사 등록", key="pacs_list_nav_register", width="stretch", on_click=_emit, args=("navigate", None, "case_register"))
+        with st.container(key="pacs_list_menu_review"):
+            st.button("검토 배정", key="pacs_list_nav_review", width="stretch", on_click=_emit, args=("navigate", None, "review_assign"))
+
+
+@st.fragment(run_every=1)
+def _render_clock() -> None:
+    """상단 바의 실시간 시계. 1초마다 이 부분만 다시 그립니다."""
+    with st.container(key="pacs_list_clock"):
+        st.html(f'<div class="pacs-clock">{datetime.now(KST):%Y. %m. %d. %H:%M:%S}</div>')
+
+
+def _render_header(user: CurrentUser) -> None:
+    with st.container(key="pacs_list_header"):
+        st.html(
+            '<div class="pacs-header">'
+            '<div class="pacs-abs pacs-crumb pacs-crumb-home">워크스페이스</div>'
+            '<div class="pacs-abs pacs-crumb-sep"></div>'
+            '<div class="pacs-abs pacs-crumb pacs-crumb-page">검사 목록</div>'
+            '<div class="pacs-abs pacs-user-line"></div>'
+            f'<div class="pacs-abs pacs-user-dept">{_esc(user.department)}</div>'
+            f'<div class="pacs-abs pacs-user-name">{_esc(user.name)}</div>'
+            "</div>"
+        )
+        _render_clock()
+        with st.container(key="pacs_list_logout"):
+            st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=("logout",))
+
+
+def _render_stats(exams: list[ExamRecord]) -> None:
+    counts = {status: sum(1 for e in exams if e.status == status) for status in STATUS_OPTIONS}
+    cards = [
+        ("전체 검사", len(exams), "접수된 검사", False),
+        (STATUS_UNASSIGNED, counts[STATUS_UNASSIGNED], "배정 대기 중", True),
+        (STATUS_ASSIGNED, counts[STATUS_ASSIGNED], "판독 대기 중", True),
+        (STATUS_DONE, counts[STATUS_DONE], "", False),
+    ]
+    body = "".join(
+        '<div class="pacs-stat">'
+        + ('<div class="pacs-abs pacs-stat-accent"></div>' if accent else "")
+        + f'<div class="pacs-abs pacs-stat-label">{_esc(label)}</div>'
+        + f'<div class="pacs-abs pacs-stat-value">{value}</div>'
+        + (f'<div class="pacs-abs pacs-stat-note">{_esc(note)}</div>' if note else "")
+        + "</div>"
+        for label, value, note, accent in cards
+    )
+    with st.container(key="pacs_list_stats"):
+        st.html(f'<div class="pacs-stats">{body}</div>')
+
+
+def _render_filters() -> None:
+    defaults = default_filter()
+    with st.container(key="pacs_list_filters", horizontal=True):
+        with st.container(key="pacs_list_field_query"):
+            st.html('<div class="pacs-filter-label">환자 검색</div>')
+            st.text_input(
+                "환자 검색",
+                key=_filter_key("query"),
+                placeholder="환자명 또는 환자 ID 검색",
+                max_chars=64,
+                label_visibility="collapsed",
+            )
+        with st.container(key="pacs_list_field_dates"):
+            st.html('<div class="pacs-filter-label">검사일</div>')
+            st.date_input(
+                "검사일",
+                value=(defaults.start, defaults.end),
+                key=_filter_key("dates"),
+                format="YYYY.MM.DD",
+                label_visibility="collapsed",
+            )
+        with st.container(key="pacs_list_field_modality"):
+            st.html('<div class="pacs-filter-label">검사 장비</div>')
+            st.selectbox("검사 장비", (ALL, *MODALITY_OPTIONS), key=_filter_key("modality"), label_visibility="collapsed")
+        with st.container(key="pacs_list_field_status"):
+            st.html('<div class="pacs-filter-label">판독 상태</div>')
+            st.selectbox("판독 상태", (ALL, *STATUS_OPTIONS), key=_filter_key("status"), label_visibility="collapsed")
+        with st.container(key="pacs_list_field_search"):
+            st.button("검색", key="pacs_list_search_button", width="stretch", on_click=_on_search)
+
+
+def _render_count(total: int, condition: SearchFilter) -> None:
+    parts = [f"{condition.start:%Y.%m.%d} – {condition.end:%Y.%m.%d}"]
+    if condition.query:
+        parts.append(f"‘{condition.query}’")
+    if condition.modality != ALL:
+        parts.append(condition.modality)
+    if condition.status != ALL:
+        parts.append(condition.status)
+    with st.container(key="pacs_list_count"):
+        st.html(
+            f'<div class="pacs-count"><b>총 {total}건</b>'
+            f'<span>검색 조건: {" · ".join(_esc(p) for p in parts)}</span></div>'
+        )
+
+
+def _row_html(exam: ExamRecord, selected: bool) -> str:
+    time_text = exam.exam_at.astimezone(KST).strftime("%H:%M") if exam.exam_at else "-"
+    return (
+        f'<div class="pacs-row{" is-selected" if selected else ""}">'
+        f'<div class="pacs-abs pacs-c-name">{_esc(exam.patient_name)}</div>'
+        f'<div class="pacs-abs pacs-c-meta">{_esc(_patient_meta(exam))}</div>'
+        f'<div class="pacs-abs pacs-c-pid">{_esc(exam.patient_id)}</div>'
+        f'<div class="pacs-abs pacs-c-mod">{_esc(exam.modality)}</div>'
+        f'<div class="pacs-abs pacs-c-exam">{_esc(exam.exam_name)}</div>'
+        f'<div class="pacs-abs pacs-c-time">{_esc(time_text)}</div>'
+        f'<div class="pacs-abs pacs-c-status">{_badge(exam.status)}</div>'
+        "</div>"
+    )
+
+
+def _render_table(rows: list[ExamRecord], selected_id: str | None, load_failed: bool) -> None:
+    with st.container(key="pacs_list_table"):
+        st.html(
+            '<div class="pacs-thead">'
+            '<div class="pacs-abs" style="left:calc(27 * var(--u))">환자명</div>'
+            '<div class="pacs-abs" style="left:calc(141 * var(--u))">환자 ID</div>'
+            '<div class="pacs-abs" style="left:calc(259 * var(--u))">장비</div>'
+            '<div class="pacs-abs" style="left:calc(322 * var(--u))">검사명</div>'
+            '<div class="pacs-abs pacs-h-time">검사 시간 ↓</div>'
+            '<div class="pacs-abs pacs-h-status">상태</div>'
+            "</div>"
+        )
+        # 줄 영역 높이(479)와 스크롤은 CSS로 정합니다. 화면 크기에 맞춰 함께 늘어나게 하기 위해서입니다.
+        with st.container(key="pacs_list_rows"):
+            if load_failed or not rows:
+                st.html(f'<div class="pacs-empty">{_esc(MSG_LOAD_FAILED if load_failed else MSG_NO_RESULT)}</div>')
+                return
+            for index, exam in enumerate(rows):
+                with st.container(key=f"pacs_list_row_{index}"):
+                    st.html(_row_html(exam, exam.case_id == selected_id))
+                    st.button(
+                        f"{exam.patient_name} 검사 선택",
+                        key=f"pacs_list_pick_{index}_{exam.case_id}",
+                        width="stretch",
+                        on_click=_select,
+                        args=(exam.case_id,),
+                    )
+
+
+def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
+    with st.container(key="pacs_list_detail"):
+        if exam is None:
+            st.html(
+                '<div class="pacs-detail">'
+                '<div class="pacs-abs pacs-d-title">검사 상세</div>'
+                '<div class="pacs-abs pacs-d-line is-top"></div>'
+                f'<div class="pacs-abs pacs-d-empty">{_esc(MSG_NO_SELECTION)}</div>'
+                "</div>"
+            )
+            return
+
+        exam_time = exam.exam_at.astimezone(KST).strftime("%Y.%m.%d  %H:%M") if exam.exam_at else "-"
+        fields = [
+            ("검사명", exam.exam_name, True),
+            ("검사일시", exam_time, False),
+            ("접수번호", exam.accession_no, False),
+            ("의뢰과", exam.department, False),
+        ]
+        rows_html = "".join(
+            f'<div class="pacs-abs pacs-d-label" style="top:calc({150 + 28 * i} * var(--u))">{_esc(label)}</div>'
+            f'<div class="pacs-abs pacs-d-value{" is-strong" if strong else ""}" '
+            f'style="top:calc({150 + 28 * i} * var(--u))">{_esc(value or "-")}</div>'
+            for i, (label, value, strong) in enumerate(fields)
+        )
+        st.html(
+            '<div class="pacs-detail">'
+            '<div class="pacs-abs pacs-d-title">검사 상세</div>'
+            '<div class="pacs-abs pacs-d-line is-top"></div>'
+            f'<div class="pacs-abs pacs-d-name">{_esc(exam.patient_name)}</div>'
+            f'<div class="pacs-abs pacs-d-badge">{_badge(exam.status)}</div>'
+            f'<div class="pacs-abs pacs-d-meta">{_esc(_patient_meta(exam))}  /  {_esc(exam.patient_id)}</div>'
+            '<div class="pacs-abs pacs-d-line" style="top:calc(132 * var(--u))"></div>'
+            f"{rows_html}"
+            '<div class="pacs-abs pacs-d-line" style="top:calc(440 * var(--u))"></div>'
+            "</div>"
+        )
+        # 수정 버튼은 등록 담당자에게만 보이고, 본인이 등록한 수정 가능 상태의 검사에서만 누를 수 있습니다.
+        if is_registrar(user):
+            allowed = can_edit(user, exam)
+            with st.container(key="pacs_list_edit"):
+                st.button(
+                    "수정",
+                    key="pacs_list_edit_button",
+                    width="stretch",
+                    disabled=not allowed,
+                    help=None if allowed else MSG_EDIT_NOT_ALLOWED,
+                    on_click=_emit,
+                    args=("edit", exam.case_id),
+                )
+        with st.container(key="pacs_list_viewer"):
+            st.button(
+                "영상 뷰어", key="pacs_list_viewer_button", width="stretch", on_click=_emit, args=("open_viewer", exam.case_id)
+            )
+
+
+def render(user: CurrentUser) -> ExamListEvent | None:
+    """검사 목록 화면을 그립니다. 다른 화면으로 이동할 버튼이 눌리면 ExamListEvent를 돌려줍니다."""
+    st.html(_STYLE)
+
+    notice = st.session_state.pop(_NOTICE_KEY, None)
+    if notice:
+        st.toast(notice)
+
+    load_failed = False
+    try:
+        exams = load_exams()
+    except Exception:
+        _logger.exception("검사 목록 불러오기 실패")
+        exams, load_failed = [], True
+
+    condition = st.session_state.get(_APPLIED_FILTER_KEY) or default_filter()
+    rows = filter_exams(exams, condition)
+
+    # 선택한 검사가 결과에 없으면 첫 번째 검사를 선택합니다.
+    selected_id = st.session_state.get(_SELECTED_KEY)
+    if rows and selected_id not in {e.case_id for e in rows}:
+        selected_id = rows[0].case_id
+        st.session_state[_SELECTED_KEY] = selected_id
+    selected = next((e for e in rows if e.case_id == selected_id), None)
+
+    with st.container(key="pacs_list_stage"):
+        _render_sidebar()
+        _render_header(user)
+        with st.container(key="pacs_list_main"):
+            with st.container(key="pacs_list_title"):
+                st.html(
+                    '<div class="pacs-title">검사 목록</div>'
+                    '<div class="pacs-subtitle">환자의 검사 영상을 확인하고 판독 업무를 시작하세요.</div>'
+                )
+            _render_stats(exams)
+            _render_filters()
+            _render_count(len(rows), condition)
+            _render_table(rows, selected_id, load_failed)
+            _render_detail(user, selected)
+
+    return st.session_state.pop(_EVENT_KEY, None)
+
+
+if __name__ == "__main__":
+    # 단독 실행 시 샘플 등록 담당자로 화면을 미리 봅니다. 화면 이동은 app.py에서 처리할 예정이라 안내만 띄웁니다.
+    st.set_page_config(page_title="PACS 검사 목록", layout="wide")
+    event = render(_PREVIEW_USER)
+    if event is not None:
+        preview_messages = {
+            "edit": "수정 화면은 준비 중입니다.",
+            "open_viewer": "영상 뷰어 화면은 준비 중입니다.",
+            "logout": "로그아웃은 app.py 연결 후 동작합니다.",
+        }
+        targets = {"case_register": "검사 등록", "review_assign": "검토 배정"}
+        message = preview_messages.get(event.kind) or f"{targets.get(event.target or '', '해당')} 화면은 준비 중입니다."
+        st.toast(message)
