@@ -10,8 +10,8 @@ app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEv
 from __future__ import annotations
 
 import base64
-import html
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -251,6 +251,7 @@ def _css_icon(svg: str) -> str:
 # ── 화면 배치 CSS ────────────────────────────────────────────────────────────
 # 모든 크기는 화면 높이에 비례하는 --u(= 화면 높이 / 960) 단위이고, 좌표는 Figma 레이어 값을 그대로 씁니다.
 # 화면이 디자인(1440)보다 넓으면 본문과 표 너비가 늘어나고, 오른쪽 요소는 오른쪽 끝을 기준으로 붙습니다.
+# 글자는 로그인 화면과 같이 key가 붙은 st.container 안의 st.markdown으로 그리고, 위치와 글꼴은 key 이름으로 정합니다.
 
 _STYLE = """
 <style>
@@ -267,19 +268,23 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   background:#f6f6f6; color:#222; font-family:'Noto Sans KR', sans-serif; font-weight:400;
 }
 .st-key-pacs_list_stage * { box-sizing:border-box; }
+
+/* Streamlit 요소의 기본 간격·여백·글꼴을 없애고, 아래에서 지정한 값만 쓰게 합니다. */
 .st-key-pacs_list_stage [data-testid="stVerticalBlock"],
 .st-key-pacs_list_stage [data-testid="stHorizontalBlock"] { gap:0 !important; }
 .st-key-pacs_list_stage [data-testid="stElementContainer"] { margin:0 !important; }
 .st-key-pacs_list_stage [data-testid="stMarkdown"],
 .st-key-pacs_list_stage [data-testid="stMarkdownContainer"],
-.st-key-pacs_list_stage [data-testid="stMarkdownContainer"] p {
+.st-key-pacs_list_stage [data-testid="stHeading"],
+.st-key-pacs_list_stage [data-testid="stHeadingWithActionElements"],
+.st-key-pacs_list_stage [data-testid="stMarkdownContainer"] p,
+.st-key-pacs_list_stage h1, .st-key-pacs_list_stage h2, .st-key-pacs_list_stage h3 {
   margin:0 !important; padding:0 !important; font-family:inherit; font-size:inherit;
-  font-weight:inherit; line-height:inherit; letter-spacing:normal; color:inherit;
+  font-weight:inherit; line-height:inherit; letter-spacing:normal; color:inherit; white-space:inherit;
 }
+.st-key-pacs_list_stage [data-testid="stHeaderActionElements"] { display:none !important; }
 .st-key-pacs_list_stage button { font-family:inherit !important; }
 .st-key-pacs_list_stage [data-testid="stButtonShortcut"], .st-key-pacs_list_stage kbd { display:none !important; }
-
-.pacs-abs { position:absolute; white-space:nowrap; }
 
 /* 절대 좌표로 배치하는 블록 */
 .st-key-pacs_list_sidebar, .st-key-pacs_list_header, .st-key-pacs_list_main,
@@ -289,32 +294,68 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_table, .st-key-pacs_list_detail, .st-key-pacs_list_edit, .st-key-pacs_list_viewer {
   position:absolute !important;
 }
+/* 절대 좌표로 배치하는 글자 칸: 내용 너비만큼만 차지하고 한 줄로 표시합니다. */
+.st-key-pacs_list_brand, .st-key-pacs_list_workspace, .st-key-pacs_list_server, .st-key-pacs_list_version,
+.st-key-pacs_list_crumb_home, .st-key-pacs_list_crumb_page, .st-key-pacs_list_user,
+[class*="st-key-pacs_list_stat_label_"], [class*="st-key-pacs_list_stat_value_"], [class*="st-key-pacs_list_stat_note_"],
+[class*="st-key-pacs_list_th_"], [class*="st-key-pacs_list_cname_"], [class*="st-key-pacs_list_cmeta_"],
+[class*="st-key-pacs_list_cpid_"], [class*="st-key-pacs_list_cmod_"], [class*="st-key-pacs_list_cexam_"],
+[class*="st-key-pacs_list_ctime_"], [class*="st-key-pacs_list_cbadge_"],
+.st-key-pacs_list_dtitle, .st-key-pacs_list_dname, [class*="st-key-pacs_list_dbadge_"], .st-key-pacs_list_dmeta,
+[class*="st-key-pacs_list_dlabel_"], [class*="st-key-pacs_list_dvalue_"], .st-key-pacs_list_dempty {
+  position:absolute !important; width:auto !important; white-space:nowrap;
+}
+/* 넘치면 말줄임(…)으로 자르는 글자 칸 */
+[class*="st-key-pacs_list_cname_"], [class*="st-key-pacs_list_cmeta_"], [class*="st-key-pacs_list_cexam_"],
+.st-key-pacs_list_dname, [class*="st-key-pacs_list_dvalue_"] { overflow:hidden; }
+:is([class*="st-key-pacs_list_cname_"], [class*="st-key-pacs_list_cmeta_"], [class*="st-key-pacs_list_cexam_"],
+    .st-key-pacs_list_dname, [class*="st-key-pacs_list_dvalue_"])
+  :is([data-testid="stElementContainer"], [data-testid="stMarkdown"], [data-testid="stMarkdownContainer"], p) {
+  width:100% !important; max-width:100%; overflow:hidden; text-overflow:ellipsis;
+}
 
 /* ── 사이드바 (204 × 화면 높이) ── */
 .st-key-pacs_list_sidebar {
-  left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919;
+  left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919; color:#fff;
 }
-.pacs-sidebar { position:relative; width:100%; height:100vh; color:#fff; }
-.pacs-logo {
-  left:calc(24 * var(--u)); top:calc(26 * var(--u)); width:calc(28 * var(--u)); height:calc(28 * var(--u));
-  border-radius:calc(6 * var(--u));
+.st-key-pacs_list_sidebar::before {
+  content:''; position:absolute; left:calc(20 * var(--u)); top:calc(111 * var(--u));
+  width:calc(164 * var(--u)); height:1px; background:#363636;
+}
+.st-key-pacs_list_brand { left:calc(24 * var(--u)); top:calc(24 * var(--u)); }
+.st-key-pacs_list_brand::before {
+  content:''; position:absolute; left:0; top:calc(2 * var(--u));
+  width:calc(28 * var(--u)); height:calc(28 * var(--u)); border-radius:calc(6 * var(--u));
   background:
     linear-gradient(#191919, #191919) center / calc(16 * var(--u)) calc(4 * var(--u)) no-repeat,
     linear-gradient(#191919, #191919) center / calc(4 * var(--u)) calc(16 * var(--u)) no-repeat,
     #f4f4f4;
 }
-.pacs-brand { left:calc(63 * var(--u)); top:calc(24 * var(--u)); font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700; }
-.pacs-brand-sub { left:calc(24 * var(--u)); top:calc(67 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
-.pacs-side-line { left:calc(20 * var(--u)); top:calc(111 * var(--u)); width:calc(164 * var(--u)); height:1px; background:#363636; }
-.pacs-workspace { left:calc(24 * var(--u)); top:calc(137 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a; }
-.pacs-server {
-  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)); height:calc(65 * var(--u));
-  border-radius:calc(6 * var(--u)); background:#252525;
+.st-key-pacs_list_brand_name {
+  padding-left:calc(39 * var(--u)); color:#fff;
+  font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700;
 }
-.pacs-server-icon { left:calc(12 * var(--u)); top:calc(11 * var(--u)); width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat; }
-.pacs-server-title { left:calc(38 * var(--u)); top:calc(11 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7; }
-.pacs-server-sub { left:calc(12 * var(--u)); top:calc(36 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
-.pacs-version { left:calc(24 * var(--u)); top:calc(927 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e; white-space:pre; }
+.st-key-pacs_list_brand_sub { margin-top:calc(8 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
+.st-key-pacs_list_workspace {
+  left:calc(24 * var(--u)); top:calc(137 * var(--u));
+  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a;
+}
+.st-key-pacs_list_server {
+  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)) !important; height:calc(65 * var(--u));
+  padding:calc(11 * var(--u)) calc(12 * var(--u)) 0 !important; border-radius:calc(6 * var(--u)); background:#252525;
+}
+.st-key-pacs_list_server::before {
+  content:''; position:absolute; left:calc(12 * var(--u)); top:calc(11 * var(--u));
+  width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat;
+}
+.st-key-pacs_list_server_title {
+  padding-left:calc(26 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7;
+}
+.st-key-pacs_list_server_sub { margin-top:calc(7 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
+.st-key-pacs_list_version {
+  left:calc(24 * var(--u)); top:calc(927 * var(--u)); white-space:pre;
+  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e;
+}
 
 /* 메뉴 버튼: 180×44, 아이콘 (14, 12), 글자 x 46 */
 .st-key-pacs_list_menu_list, .st-key-pacs_list_menu_register, .st-key-pacs_list_menu_review {
@@ -348,19 +389,30 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   left:calc(204 * var(--u)); right:0; top:0; height:calc(64 * var(--u));
   width:auto !important; background:#fff; border-bottom:1px solid #e5e5e5;
 }
-.pacs-header { position:relative; width:100%; height:calc(63 * var(--u)); }
-.pacs-crumb { top:calc(23 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); }
-.pacs-crumb-home { left:calc(32 * var(--u)); color:#777; }
-.pacs-crumb-sep { left:calc(116 * var(--u)); top:calc(24 * var(--u)); width:calc(16 * var(--u)); height:calc(16 * var(--u)); background:@ICON_CHEVRON_RIGHT@ center / contain no-repeat; }
-.pacs-crumb-page { left:calc(143 * var(--u)); color:#222; font-weight:500; }
-.pacs-user-line { left:calc(100% - 278 * var(--u)); top:calc(21 * var(--u)); width:1px; height:calc(22 * var(--u)); background:#e5e5e5; }
-.pacs-user-dept { left:calc(100% - 242 * var(--u)); top:calc(15 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
-.pacs-user-name { left:calc(100% - 242 * var(--u)); top:calc(31 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#222; }
+.st-key-pacs_list_crumb_home {
+  left:calc(32 * var(--u)); top:calc(23 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#777;
+}
+.st-key-pacs_list_crumb_page {
+  left:calc(143 * var(--u)); top:calc(23 * var(--u));
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#222;
+}
+.st-key-pacs_list_crumb_page::before {
+  content:''; position:absolute; left:calc(-27 * var(--u)); top:calc(1 * var(--u));
+  width:calc(16 * var(--u)); height:calc(16 * var(--u)); background:@ICON_CHEVRON_RIGHT@ center / contain no-repeat;
+}
+.st-key-pacs_list_user { left:calc(100% - 242 * var(--u)); top:calc(15 * var(--u)); overflow:visible; }
+.st-key-pacs_list_user::before {
+  content:''; position:absolute; left:calc(-36 * var(--u)); top:calc(6 * var(--u));
+  width:1px; height:calc(22 * var(--u)); background:#e5e5e5;
+}
+.st-key-pacs_list_user_dept { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
+.st-key-pacs_list_user_name {
+  margin-top:calc(-1 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#222;
+}
 .st-key-pacs_list_clock {
   right:calc(303 * var(--u)); top:calc(23 * var(--u)); width:auto !important; text-align:right; white-space:nowrap;
   font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#666; font-variant-numeric:tabular-nums;
 }
-.pacs-clock { white-space:nowrap; }
 .st-key-pacs_list_logout { right:calc(31 * var(--u)); top:calc(18 * var(--u)); width:calc(28 * var(--u)) !important; height:calc(28 * var(--u)); }
 .st-key-pacs_list_logout button {
   width:calc(28 * var(--u)) !important; height:calc(28 * var(--u)) !important; min-height:0 !important; padding:0 !important;
@@ -374,21 +426,34 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_main {
   left:calc(204 * var(--u)); right:0; top:calc(64 * var(--u)); bottom:0; width:auto !important;
 }
-.st-key-pacs_list_title { left:calc(32 * var(--u)); top:calc(25 * var(--u)); width:auto !important; }
-.pacs-title { font-size:calc(26 * var(--u)); line-height:calc(39 * var(--u)); font-weight:700; color:#1d1d1d; }
-.pacs-subtitle { margin:calc(5 * var(--u)) 0 0 1px; font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); color:#727272; }
+.st-key-pacs_list_title { left:calc(32 * var(--u)); top:calc(25 * var(--u)); width:auto !important; white-space:nowrap; }
+.st-key-pacs_list_title_text { font-size:calc(26 * var(--u)); line-height:calc(39 * var(--u)); font-weight:700; color:#1d1d1d; }
+.st-key-pacs_list_subtitle { margin:calc(5 * var(--u)) 0 0 1px; font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); color:#727272; }
 
 /* 통계 카드 4개: 280×88, 간격 17~18 */
-.st-key-pacs_list_stats { left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(110 * var(--u)); width:auto !important; }
-.pacs-stats { display:grid; grid-template-columns:repeat(4, 1fr); gap:calc(17.33 * var(--u)); }
-.pacs-stat {
-  position:relative; height:calc(88 * var(--u)); background:#fff; border:1px solid #e1e1e1;
+.st-key-pacs_list_stage .st-key-pacs_list_stats {
+  left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(110 * var(--u)); width:auto !important;
+  flex-wrap:nowrap !important; gap:calc(17.33 * var(--u)) !important;
+}
+.st-key-pacs_list_stats > div { flex:1 1 0 !important; width:auto !important; min-width:0 !important; }
+[class*="st-key-pacs_list_stat_card_"] {
+  position:relative; width:100% !important; height:calc(88 * var(--u)) !important; flex:0 0 auto !important;
+  background:#fff; border:1px solid #e1e1e1;
   border-radius:calc(7 * var(--u)); overflow:hidden;
 }
-.pacs-stat-label { left:calc(17 * var(--u)); top:calc(12 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#626262; }
-.pacs-stat-value { left:calc(17 * var(--u)); top:calc(33 * var(--u)); font-size:calc(28 * var(--u)); line-height:calc(42 * var(--u)); font-weight:700; color:#222; }
-.pacs-stat-note { left:calc(107 * var(--u)); top:calc(53 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
-.pacs-stat-accent { left:-1px; top:calc(16 * var(--u)); width:3px; height:calc(54 * var(--u)); border-radius:1px; background:#333; }
+[class*="st-key-pacs_list_stat_card_accent_"]::before {
+  content:''; position:absolute; left:-1px; top:calc(16 * var(--u)); width:3px; height:calc(54 * var(--u));
+  border-radius:1px; background:#333;
+}
+[class*="st-key-pacs_list_stat_label_"] {
+  left:calc(17 * var(--u)); top:calc(12 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#626262;
+}
+[class*="st-key-pacs_list_stat_value_"] {
+  left:calc(17 * var(--u)); top:calc(33 * var(--u)); font-size:calc(28 * var(--u)); line-height:calc(42 * var(--u)); font-weight:700; color:#222;
+}
+[class*="st-key-pacs_list_stat_note_"] {
+  left:calc(107 * var(--u)); top:calc(53 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777;
+}
 
 /* 검색 조건 줄: 라벨(11) + 입력칸(42), 칸 사이 16, 검색 버튼 앞 12 */
 .st-key-pacs_list_stage .st-key-pacs_list_filters {
@@ -404,7 +469,10 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_field_status { width:calc(182 * var(--u)) !important; }
 .st-key-pacs_list_field_search { width:calc(68 * var(--u)) !important; }
 .st-key-pacs_list_filters > div:has(> .st-key-pacs_list_field_search) { margin-left:calc(-4 * var(--u)) !important; }
-.pacs-filter-label { margin-bottom:calc(5 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#666; }
+[class*="st-key-pacs_list_label_"] {
+  margin-bottom:calc(5 * var(--u)); white-space:nowrap;
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#666;
+}
 [class*="st-key-pacs_list_field_"] [data-testid="stTextInput"],
 [class*="st-key-pacs_list_field_"] [data-testid="stDateInput"],
 [class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] { width:100% !important; }
@@ -467,98 +535,146 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_field_search button p { font-size:0 !important; }
 
 /* 총 N건 · 적용된 검색 조건 */
-.st-key-pacs_list_count { left:calc(32 * var(--u)); top:calc(301 * var(--u)); width:auto !important; }
-.pacs-count { white-space:nowrap; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); }
-.pacs-count b { font-weight:700; color:#222; }
-.pacs-count span { margin-left:calc(8 * var(--u)); color:#858585; font-size:calc(11 * var(--u)); }
+.st-key-pacs_list_stage .st-key-pacs_list_count {
+  left:calc(32 * var(--u)); top:calc(301 * var(--u)); width:auto !important;
+  flex-wrap:nowrap !important; align-items:baseline !important; white-space:nowrap;
+}
+.st-key-pacs_list_count > div { flex:0 0 auto !important; width:auto !important; }
+.st-key-pacs_list_count_total { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:700; color:#222; }
+.st-key-pacs_list_count_cond { margin-left:calc(8 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(18 * var(--u)); color:#858585; }
 
 /* ── 검사 표: 왼쪽 32, 오른쪽은 상세 패널(324) 앞 16 ── */
 .st-key-pacs_list_table {
   left:calc(32 * var(--u)); right:calc(372 * var(--u)); top:calc(328 * var(--u)); height:calc(520 * var(--u));
   width:auto !important; background:#fff; border:1px solid #dedede; border-radius:calc(7 * var(--u)); overflow:hidden;
 }
-.pacs-thead {
-  position:relative; height:calc(39 * var(--u)); background:#f8f8f8;
-  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#6d6d6d;
+.st-key-pacs_list_thead { position:relative; flex:0 0 auto; height:calc(39 * var(--u)); background:#f8f8f8; }
+[class*="st-key-pacs_list_th_"] {
+  top:calc(11 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#6d6d6d;
 }
-.pacs-thead .pacs-abs { top:calc(11 * var(--u)); }
+.st-key-pacs_list_th_name { left:calc(27 * var(--u)); }
+.st-key-pacs_list_th_pid { left:calc(141 * var(--u)); }
+.st-key-pacs_list_th_mod { left:calc(259 * var(--u)); }
+.st-key-pacs_list_th_exam { left:calc(322 * var(--u)); }
+.st-key-pacs_list_th_time { right:calc(212 * var(--u)); }
+.st-key-pacs_list_th_status { right:calc(78 * var(--u)); }
 .st-key-pacs_list_rows {
   flex:0 0 auto !important; min-height:0 !important; display:block !important;
   height:calc(479 * var(--u)) !important; max-height:none !important; overflow-y:auto !important; overflow-x:hidden;
   scrollbar-width:thin; scrollbar-color:#cfcfcf transparent;
 }
-[class*="st-key-pacs_list_row_"] { position:relative; height:calc(48 * var(--u)); flex:0 0 auto; }
-.pacs-row { position:relative; height:calc(48 * var(--u)); background:#fff; border-bottom:1px solid #ececec; }
-[class*="st-key-pacs_list_row_"]:hover .pacs-row:not(.is-selected) { background:#fafafa; }
-.pacs-row.is-selected { background:#eee; }
-.pacs-row.is-selected::before { content:''; position:absolute; left:0; top:0; width:3px; height:100%; background:#292929; }
-.pacs-c-name { top:calc(6 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#292929; }
-.pacs-c-meta { top:calc(25 * var(--u)); font-size:calc(9 * var(--u)); line-height:calc(14 * var(--u)); color:#7a7a7a; }
-.pacs-c-name, .pacs-c-meta { left:calc(28 * var(--u)); max-width:calc(108 * var(--u)); overflow:hidden; text-overflow:ellipsis; }
-.pacs-c-pid { left:calc(143 * var(--u)); top:calc(15 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#656565; }
-.pacs-c-mod {
-  left:calc(258 * var(--u)); top:calc(14 * var(--u)); width:calc(32 * var(--u)); height:calc(21 * var(--u));
-  display:flex; align-items:center; justify-content:center; border:1px solid #d9d9d9; border-radius:calc(3 * var(--u));
-  background:#f4f4f4; font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#555;
+/* 줄: 일반 줄(pacs_list_row_N)과 선택된 줄(pacs_list_selrow_N) */
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) {
+  position:relative; flex:0 0 auto; height:calc(48 * var(--u)); background:#fff; border-bottom:1px solid #ececec;
 }
-.pacs-c-exam {
-  left:calc(324 * var(--u)); right:calc(278 * var(--u)); top:calc(15 * var(--u)); overflow:hidden; text-overflow:ellipsis;
+[class*="st-key-pacs_list_row_"]:hover { background:#fafafa; }
+[class*="st-key-pacs_list_selrow_"] { background:#eee; }
+[class*="st-key-pacs_list_selrow_"]::before {
+  content:''; position:absolute; left:0; top:0; width:3px; height:100%; background:#292929; z-index:1;
+}
+[class*="st-key-pacs_list_cname_"] {
+  left:calc(28 * var(--u)); top:calc(6 * var(--u)); max-width:calc(108 * var(--u));
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#292929;
+}
+[class*="st-key-pacs_list_cmeta_"] {
+  left:calc(28 * var(--u)); top:calc(25 * var(--u)); max-width:calc(108 * var(--u));
+  font-size:calc(9 * var(--u)); line-height:calc(14 * var(--u)); color:#7a7a7a;
+}
+[class*="st-key-pacs_list_cpid_"] {
+  left:calc(143 * var(--u)); top:calc(15 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#656565;
+}
+[class*="st-key-pacs_list_cmod_"] {
+  left:calc(258 * var(--u)); top:calc(14 * var(--u)); width:calc(32 * var(--u)) !important; height:calc(21 * var(--u));
+  display:flex !important; align-items:center; justify-content:center;
+  border:1px solid #d9d9d9; border-radius:calc(3 * var(--u)); background:#f4f4f4; text-align:center;
+  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#555;
+}
+[class*="st-key-pacs_list_cexam_"] {
+  left:calc(324 * var(--u)); right:calc(278 * var(--u)); top:calc(15 * var(--u));
   font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#333;
 }
-.pacs-c-time { right:calc(228 * var(--u)); top:calc(15 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#666; font-variant-numeric:tabular-nums; }
-.pacs-c-status { right:calc(47 * var(--u)); top:calc(12 * var(--u)); }
-.pacs-h-time { right:calc(212 * var(--u)); }
-.pacs-h-status { right:calc(78 * var(--u)); }
+[class*="st-key-pacs_list_ctime_"] {
+  right:calc(228 * var(--u)); top:calc(15 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u));
+  color:#666; font-variant-numeric:tabular-nums; text-align:right;
+}
+[class*="st-key-pacs_list_cbadge_"] { right:calc(47 * var(--u)); top:calc(12 * var(--u)); }
 /* 줄 전체를 덮는 투명 선택 버튼 */
-[class*="st-key-pacs_list_row_"] [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
   position:absolute !important; inset:0; z-index:2; width:100% !important; height:100% !important;
 }
-[class*="st-key-pacs_list_row_"] [data-testid="stButton"],
-[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button {
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stButton"],
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stButton"] button {
   width:100% !important; height:100% !important; min-height:0 !important;
 }
-[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button {
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stButton"] button {
   padding:0 !important; border:0 !important; border-radius:0 !important; box-shadow:none !important;
   background:transparent !important; cursor:pointer;
 }
-[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button p { font-size:0 !important; }
-[class*="st-key-pacs_list_row_"] [data-testid="stButton"] button:focus-visible { outline:2px solid #555 !important; outline-offset:-2px; }
-.pacs-empty {
-  display:flex; align-items:center; justify-content:center; height:calc(479 * var(--u)); padding:0 calc(24 * var(--u));
-  text-align:center; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585; white-space:normal;
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stButton"] button p { font-size:0 !important; }
+:is([class*="st-key-pacs_list_row_"], [class*="st-key-pacs_list_selrow_"]) [data-testid="stButton"] button:focus-visible {
+  outline:2px solid #555 !important; outline-offset:-2px;
+}
+.st-key-pacs_list_empty {
+  display:flex !important; flex:0 0 auto !important; align-items:center; justify-content:center;
+  height:calc(479 * var(--u)) !important;
+  padding:0 calc(24 * var(--u)); text-align:center; white-space:normal;
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
 }
 
-/* 상태 배지: 80×26 */
-.pacs-badge {
-  display:flex; align-items:center; justify-content:center; width:calc(80 * var(--u)); height:calc(26 * var(--u));
-  border-radius:calc(6 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(15 * var(--u)); white-space:nowrap;
+/* 상태 배지: 80×26. key에 상태 종류(done / assigned / unassigned)가 들어갑니다. */
+[class*="st-key-pacs_list_cbadge_"], [class*="st-key-pacs_list_dbadge_"] {
+  width:calc(80 * var(--u)) !important; height:calc(26 * var(--u)); display:flex !important;
+  align-items:center; justify-content:center; border-radius:calc(6 * var(--u)); text-align:center;
+  font-size:calc(11 * var(--u)); line-height:calc(15 * var(--u));
 }
-.pacs-badge.is-done { background:#252525; color:#fff; }
-.pacs-badge.is-assigned { background:#f4f4f4; color:#222; font-weight:700; }
-.pacs-badge.is-unassigned { background:#fff; color:#666; border:1px solid #d8d8d8; }
+[class*="st-key-pacs_list_cbadge_done_"], .st-key-pacs_list_dbadge_done { background:#252525; color:#fff; }
+[class*="st-key-pacs_list_cbadge_assigned_"], .st-key-pacs_list_dbadge_assigned { background:#f4f4f4; color:#222; font-weight:700; }
+[class*="st-key-pacs_list_cbadge_unassigned_"], .st-key-pacs_list_dbadge_unassigned { background:#fff; color:#666; border:1px solid #d8d8d8; }
 
 /* ── 검사 상세 패널: 324×520 ── */
 .st-key-pacs_list_detail {
   right:calc(32 * var(--u)); top:calc(328 * var(--u)); width:calc(324 * var(--u)) !important; height:calc(520 * var(--u));
   background:#fff; border:1px solid #dedede; border-radius:calc(7 * var(--u)); overflow:hidden;
 }
-.pacs-detail { position:relative; height:calc(518 * var(--u)); }
-.pacs-d-title { left:calc(19 * var(--u)); top:calc(14 * var(--u)); font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); font-weight:700; color:#333; }
-.pacs-d-line { left:calc(19 * var(--u)); width:calc(284 * var(--u)); height:1px; background:#e8e8e8; }
-.pacs-d-line.is-top { left:0; width:100%; top:calc(46 * var(--u)); background:#e5e5e5; }
-.pacs-d-name { left:calc(19 * var(--u)); top:calc(64 * var(--u)); max-width:calc(196 * var(--u)); overflow:hidden; text-overflow:ellipsis; font-size:calc(21 * var(--u)); line-height:calc(32 * var(--u)); font-weight:700; color:#222; }
-.pacs-d-badge { left:calc(223 * var(--u)); top:calc(71 * var(--u)); }
-.pacs-d-meta { left:calc(19 * var(--u)); top:calc(99 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; white-space:pre; }
-.pacs-d-label, .pacs-d-value { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); }
-.pacs-d-label { left:calc(19 * var(--u)); color:#7a7a7a; }
-.pacs-d-value { left:calc(98 * var(--u)); max-width:calc(205 * var(--u)); overflow:hidden; text-overflow:ellipsis; color:#333; white-space:pre; }
-.pacs-d-value.is-strong { font-weight:500; }
-.pacs-d-empty {
-  left:calc(19 * var(--u)); right:calc(19 * var(--u)); top:calc(47 * var(--u)); bottom:0; display:flex; align-items:center;
-  justify-content:center; text-align:center; white-space:normal; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
+.st-key-pacs_list_detail::before {
+  content:''; position:absolute; left:0; right:0; top:calc(46 * var(--u)); height:1px; background:#e5e5e5;
+}
+.st-key-pacs_list_dtitle {
+  left:calc(19 * var(--u)); top:calc(14 * var(--u)); font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); font-weight:700; color:#333;
+}
+.st-key-pacs_list_dname {
+  left:calc(19 * var(--u)); top:calc(64 * var(--u)); max-width:calc(196 * var(--u));
+  font-size:calc(21 * var(--u)); line-height:calc(32 * var(--u)); font-weight:700; color:#222;
+}
+[class*="st-key-pacs_list_dbadge_"] { left:calc(223 * var(--u)); top:calc(71 * var(--u)); }
+.st-key-pacs_list_dmeta {
+  left:calc(19 * var(--u)); top:calc(99 * var(--u)); white-space:pre; overflow:visible;
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777;
+}
+.st-key-pacs_list_dmeta::after {
+  content:''; position:absolute; left:0; top:calc(33 * var(--u)); width:calc(284 * var(--u)); height:1px; background:#e8e8e8;
+}
+[class*="st-key-pacs_list_dlabel_"] { left:calc(19 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#7a7a7a; }
+[class*="st-key-pacs_list_dvalue_"] {
+  left:calc(98 * var(--u)); max-width:calc(205 * var(--u)); white-space:pre;
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#333;
+}
+.st-key-pacs_list_dvalue_0 { font-weight:500; }
+.st-key-pacs_list_dlabel_0, .st-key-pacs_list_dvalue_0 { top:calc(150 * var(--u)); }
+.st-key-pacs_list_dlabel_1, .st-key-pacs_list_dvalue_1 { top:calc(178 * var(--u)); }
+.st-key-pacs_list_dlabel_2, .st-key-pacs_list_dvalue_2 { top:calc(206 * var(--u)); }
+.st-key-pacs_list_dlabel_3, .st-key-pacs_list_dvalue_3 { top:calc(234 * var(--u)); }
+.st-key-pacs_list_dempty {
+  left:calc(19 * var(--u)); right:calc(19 * var(--u)); top:calc(47 * var(--u)); bottom:0;
+  display:flex !important; align-items:center; justify-content:center; text-align:center; white-space:normal;
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
 }
 .st-key-pacs_list_edit { left:calc(242 * var(--u)); top:calc(11 * var(--u)); width:calc(67 * var(--u)) !important; height:calc(23 * var(--u)); }
 .st-key-pacs_list_viewer { left:calc(19 * var(--u)); top:calc(458 * var(--u)); width:calc(284 * var(--u)) !important; height:calc(41 * var(--u)); }
+/* 영상 뷰어 버튼 위 구분선(패널 기준 y 440) */
+.st-key-pacs_list_viewer::before {
+  content:''; position:absolute; left:0; top:calc(-18 * var(--u)); width:100%; height:1px; background:#e8e8e8;
+}
 .st-key-pacs_list_edit [data-testid="stElementContainer"], .st-key-pacs_list_viewer [data-testid="stElementContainer"],
 .st-key-pacs_list_edit [data-testid="stButton"], .st-key-pacs_list_viewer [data-testid="stButton"],
 .st-key-pacs_list_edit [data-testid="stButton"] > div, .st-key-pacs_list_edit [data-testid="stTooltipIcon"],
@@ -639,13 +755,26 @@ def _on_search() -> None:
 
 # ── 화면 그리기 ──────────────────────────────────────────────────────────────
 
-def _esc(value: object) -> str:
-    return html.escape(str(value), quote=True)
+# Markdown 기호를 글자 그대로 보이게 하기 위해 앞에 \를 붙일 문자들입니다.
+# 예: "2026. 11. 19."이 번호 목록이 되거나, "L-spine"의 기호가 서식으로 바뀌는 것을 막습니다.
+_MARKDOWN_SYMBOLS = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~:$=&^])")
 
 
-def _badge(status: str, extra_class: str = "") -> str:
-    kind = {STATUS_DONE: "is-done", STATUS_ASSIGNED: "is-assigned"}.get(status, "is-unassigned")
-    return f'<div class="pacs-badge {kind} {extra_class}">{_esc(status)}</div>'
+def _md(text: object) -> str:
+    return _MARKDOWN_SYMBOLS.sub(r"\\\1", str(text))
+
+
+def _text(key: str, body: object, align: str = "left") -> None:
+    """글자 한 덩어리를 표시합니다(로그인 화면과 같은 방식). 글꼴·색·위치는 key 이름으로 위의 CSS가 정합니다.
+
+    화면 데이터(환자명, 검사명 등)를 그대로 넘겨도 Markdown 서식으로 바뀌지 않습니다. 줄바꿈(\\n)은 줄을 바꿉니다.
+    """
+    with st.container(key=key):
+        st.markdown("  \n".join(_md(line) for line in str(body).split("\n")), text_alignment=align)
+
+
+def _badge_kind(status: str) -> str:
+    return {STATUS_DONE: "done", STATUS_ASSIGNED: "assigned"}.get(status, "unassigned")
 
 
 def _patient_meta(exam: ExamRecord) -> str:
@@ -655,79 +784,70 @@ def _patient_meta(exam: ExamRecord) -> str:
 
 def _render_sidebar() -> None:
     with st.container(key="pacs_list_sidebar"):
-        st.html(
-            '<div class="pacs-sidebar">'
-            '<div class="pacs-abs pacs-logo"></div>'
-            '<div class="pacs-abs pacs-brand">PACS</div>'
-            '<div class="pacs-abs pacs-brand-sub">의료영상 관리 시스템</div>'
-            '<div class="pacs-abs pacs-side-line"></div>'
-            '<div class="pacs-abs pacs-workspace">WORKSPACE</div>'
-            '<div class="pacs-abs pacs-server">'
-            '<div class="pacs-abs pacs-server-icon"></div>'
-            '<div class="pacs-abs pacs-server-title">서버 연결 정상</div>'
-            '<div class="pacs-abs pacs-server-sub">DICOM 서비스 운영 중</div>'
-            "</div>"
-            '<div class="pacs-abs pacs-version">PACS  /  v1.1</div>'
-            "</div>"
-        )
+        with st.container(key="pacs_list_brand"):
+            _text("pacs_list_brand_name", "PACS")
+            _text("pacs_list_brand_sub", "의료영상 관리 시스템")
+        _text("pacs_list_workspace", "WORKSPACE")
         with st.container(key="pacs_list_menu_list"):
             st.button("검사 목록", key="pacs_list_nav_list", width="stretch")
         with st.container(key="pacs_list_menu_register"):
             st.button("검사 등록", key="pacs_list_nav_register", width="stretch", on_click=_emit, args=("navigate", None, "case_register"))
         with st.container(key="pacs_list_menu_review"):
             st.button("검토 배정", key="pacs_list_nav_review", width="stretch", on_click=_emit, args=("navigate", None, "review_assign"))
+        with st.container(key="pacs_list_server"):
+            _text("pacs_list_server_title", "서버 연결 정상")
+            _text("pacs_list_server_sub", "DICOM 서비스 운영 중")
+        _text("pacs_list_version", "PACS  /  v1.1")
 
 
 @st.fragment(run_every=1)
 def _render_clock() -> None:
     """상단 바의 실시간 시계. 1초마다 이 부분만 다시 그립니다."""
-    with st.container(key="pacs_list_clock"):
-        st.html(f'<div class="pacs-clock">{datetime.now(KST):%Y. %m. %d. %H:%M:%S}</div>')
+    _text("pacs_list_clock", f"{datetime.now(KST):%Y. %m. %d. %H:%M:%S}")
 
 
 def _render_header(user: CurrentUser) -> None:
     with st.container(key="pacs_list_header"):
-        st.html(
-            '<div class="pacs-header">'
-            '<div class="pacs-abs pacs-crumb pacs-crumb-home">워크스페이스</div>'
-            '<div class="pacs-abs pacs-crumb-sep"></div>'
-            '<div class="pacs-abs pacs-crumb pacs-crumb-page">검사 목록</div>'
-            '<div class="pacs-abs pacs-user-line"></div>'
-            f'<div class="pacs-abs pacs-user-dept">{_esc(user.department)}</div>'
-            f'<div class="pacs-abs pacs-user-name">{_esc(user.name)}</div>'
-            "</div>"
-        )
+        _text("pacs_list_crumb_home", "워크스페이스")
+        _text("pacs_list_crumb_page", "검사 목록")
+        with st.container(key="pacs_list_user"):
+            _text("pacs_list_user_dept", user.department)
+            _text("pacs_list_user_name", user.name)
         _render_clock()
         with st.container(key="pacs_list_logout"):
             st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=("logout",))
 
 
+def _render_title() -> None:
+    with st.container(key="pacs_list_title"):
+        with st.container(key="pacs_list_title_text"):
+            st.title("검사 목록", anchor=False)
+        _text("pacs_list_subtitle", "환자의 검사 영상을 확인하고 판독 업무를 시작하세요.")
+
+
 def _render_stats(exams: list[ExamRecord]) -> None:
     counts = {status: sum(1 for e in exams if e.status == status) for status in STATUS_OPTIONS}
+    # (key 이름, 라벨, 숫자, 보조 문구, 강조 막대 여부)
     cards = [
-        ("전체 검사", len(exams), "접수된 검사", False),
-        (STATUS_UNASSIGNED, counts[STATUS_UNASSIGNED], "배정 대기 중", True),
-        (STATUS_ASSIGNED, counts[STATUS_ASSIGNED], "판독 대기 중", True),
-        (STATUS_DONE, counts[STATUS_DONE], "", False),
+        ("total", "전체 검사", len(exams), "접수된 검사", False),
+        ("unassigned", STATUS_UNASSIGNED, counts[STATUS_UNASSIGNED], "배정 대기 중", True),
+        ("assigned", STATUS_ASSIGNED, counts[STATUS_ASSIGNED], "판독 대기 중", True),
+        ("done", STATUS_DONE, counts[STATUS_DONE], "", False),
     ]
-    body = "".join(
-        '<div class="pacs-stat">'
-        + ('<div class="pacs-abs pacs-stat-accent"></div>' if accent else "")
-        + f'<div class="pacs-abs pacs-stat-label">{_esc(label)}</div>'
-        + f'<div class="pacs-abs pacs-stat-value">{value}</div>'
-        + (f'<div class="pacs-abs pacs-stat-note">{_esc(note)}</div>' if note else "")
-        + "</div>"
-        for label, value, note, accent in cards
-    )
-    with st.container(key="pacs_list_stats"):
-        st.html(f'<div class="pacs-stats">{body}</div>')
+    with st.container(key="pacs_list_stats", horizontal=True):
+        for name, label, value, note, accent in cards:
+            with st.container(key=f"pacs_list_stat_card_{'accent_' if accent else ''}{name}"):
+                _text(f"pacs_list_stat_label_{name}", label)
+                _text(f"pacs_list_stat_value_{name}", value)
+                if note:
+                    _text(f"pacs_list_stat_note_{name}", note)
 
 
 def _render_filters() -> None:
     defaults = default_filter()
     with st.container(key="pacs_list_filters", horizontal=True):
         with st.container(key="pacs_list_field_query"):
-            st.html('<div class="pacs-filter-label">환자 검색</div>')
+            _text("pacs_list_label_query", "환자 검색")
             st.text_input(
                 "환자 검색",
                 key=_filter_key("query"),
@@ -736,7 +856,7 @@ def _render_filters() -> None:
                 label_visibility="collapsed",
             )
         with st.container(key="pacs_list_field_dates"):
-            st.html('<div class="pacs-filter-label">검사일</div>')
+            _text("pacs_list_label_dates", "검사일")
             st.date_input(
                 "검사일",
                 value=(defaults.start, defaults.end),
@@ -745,10 +865,10 @@ def _render_filters() -> None:
                 label_visibility="collapsed",
             )
         with st.container(key="pacs_list_field_modality"):
-            st.html('<div class="pacs-filter-label">검사 장비</div>')
+            _text("pacs_list_label_modality", "검사 장비")
             st.selectbox("검사 장비", (ALL, *MODALITY_OPTIONS), key=_filter_key("modality"), label_visibility="collapsed")
         with st.container(key="pacs_list_field_status"):
-            st.html('<div class="pacs-filter-label">판독 상태</div>')
+            _text("pacs_list_label_status", "판독 상태")
             st.selectbox("판독 상태", (ALL, *STATUS_OPTIONS), key=_filter_key("status"), label_visibility="collapsed")
         with st.container(key="pacs_list_field_search"):
             st.button("검색", key="pacs_list_search_button", width="stretch", on_click=_on_search)
@@ -762,94 +882,70 @@ def _render_count(total: int, condition: SearchFilter) -> None:
         parts.append(condition.modality)
     if condition.status != ALL:
         parts.append(condition.status)
-    with st.container(key="pacs_list_count"):
-        st.html(
-            f'<div class="pacs-count"><b>총 {total}건</b>'
-            f'<span>검색 조건: {" · ".join(_esc(p) for p in parts)}</span></div>'
-        )
+    with st.container(key="pacs_list_count", horizontal=True):
+        _text("pacs_list_count_total", f"총 {total}건")
+        _text("pacs_list_count_cond", f"검색 조건: {' · '.join(parts)}")
 
 
-def _row_html(exam: ExamRecord, selected: bool) -> str:
+def _render_row(index: int, exam: ExamRecord, selected: bool) -> None:
+    """검사 한 줄. 선택된 줄은 key가 pacs_list_selrow_N이 되어 배경과 왼쪽 막대가 바뀝니다."""
     time_text = exam.exam_at.astimezone(KST).strftime("%H:%M") if exam.exam_at else "-"
-    return (
-        f'<div class="pacs-row{" is-selected" if selected else ""}">'
-        f'<div class="pacs-abs pacs-c-name">{_esc(exam.patient_name)}</div>'
-        f'<div class="pacs-abs pacs-c-meta">{_esc(_patient_meta(exam))}</div>'
-        f'<div class="pacs-abs pacs-c-pid">{_esc(exam.patient_id)}</div>'
-        f'<div class="pacs-abs pacs-c-mod">{_esc(exam.modality)}</div>'
-        f'<div class="pacs-abs pacs-c-exam">{_esc(exam.exam_name)}</div>'
-        f'<div class="pacs-abs pacs-c-time">{_esc(time_text)}</div>'
-        f'<div class="pacs-abs pacs-c-status">{_badge(exam.status)}</div>'
-        "</div>"
-    )
+    with st.container(key=f"pacs_list_{'selrow' if selected else 'row'}_{index}"):
+        _text(f"pacs_list_cname_{index}", exam.patient_name)
+        _text(f"pacs_list_cmeta_{index}", _patient_meta(exam))
+        _text(f"pacs_list_cpid_{index}", exam.patient_id)
+        _text(f"pacs_list_cmod_{index}", exam.modality, align="center")
+        _text(f"pacs_list_cexam_{index}", exam.exam_name)
+        _text(f"pacs_list_ctime_{index}", time_text, align="right")
+        _text(f"pacs_list_cbadge_{_badge_kind(exam.status)}_{index}", exam.status, align="center")
+        st.button(
+            f"{exam.patient_name} 검사 선택",
+            key=f"pacs_list_pick_{index}_{exam.case_id}",
+            width="stretch",
+            on_click=_select,
+            args=(exam.case_id,),
+        )
 
 
 def _render_table(rows: list[ExamRecord], selected_id: str | None, load_failed: bool) -> None:
     with st.container(key="pacs_list_table"):
-        st.html(
-            '<div class="pacs-thead">'
-            '<div class="pacs-abs" style="left:calc(27 * var(--u))">환자명</div>'
-            '<div class="pacs-abs" style="left:calc(141 * var(--u))">환자 ID</div>'
-            '<div class="pacs-abs" style="left:calc(259 * var(--u))">장비</div>'
-            '<div class="pacs-abs" style="left:calc(322 * var(--u))">검사명</div>'
-            '<div class="pacs-abs pacs-h-time">검사 시간 ↓</div>'
-            '<div class="pacs-abs pacs-h-status">상태</div>'
-            "</div>"
-        )
+        with st.container(key="pacs_list_thead"):
+            for name, label in (
+                ("name", "환자명"), ("pid", "환자 ID"), ("mod", "장비"),
+                ("exam", "검사명"), ("time", "검사 시간 ↓"), ("status", "상태"),
+            ):
+                _text(f"pacs_list_th_{name}", label)
         # 줄 영역 높이(479)와 스크롤은 CSS로 정합니다. 화면 크기에 맞춰 함께 늘어나게 하기 위해서입니다.
         with st.container(key="pacs_list_rows"):
             if load_failed or not rows:
-                st.html(f'<div class="pacs-empty">{_esc(MSG_LOAD_FAILED if load_failed else MSG_NO_RESULT)}</div>')
+                _text("pacs_list_empty", MSG_LOAD_FAILED if load_failed else MSG_NO_RESULT, align="center")
                 return
             for index, exam in enumerate(rows):
-                with st.container(key=f"pacs_list_row_{index}"):
-                    st.html(_row_html(exam, exam.case_id == selected_id))
-                    st.button(
-                        f"{exam.patient_name} 검사 선택",
-                        key=f"pacs_list_pick_{index}_{exam.case_id}",
-                        width="stretch",
-                        on_click=_select,
-                        args=(exam.case_id,),
-                    )
+                _render_row(index, exam, exam.case_id == selected_id)
 
 
 def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
     with st.container(key="pacs_list_detail"):
+        with st.container(key="pacs_list_dtitle"):
+            st.subheader("검사 상세", anchor=False)
         if exam is None:
-            st.html(
-                '<div class="pacs-detail">'
-                '<div class="pacs-abs pacs-d-title">검사 상세</div>'
-                '<div class="pacs-abs pacs-d-line is-top"></div>'
-                f'<div class="pacs-abs pacs-d-empty">{_esc(MSG_NO_SELECTION)}</div>'
-                "</div>"
-            )
+            _text("pacs_list_dempty", MSG_NO_SELECTION, align="center")
             return
 
         exam_time = exam.exam_at.astimezone(KST).strftime("%Y.%m.%d  %H:%M") if exam.exam_at else "-"
         fields = [
-            ("검사명", exam.exam_name, True),
-            ("검사일시", exam_time, False),
-            ("접수번호", exam.accession_no, False),
-            ("의뢰과", exam.department, False),
+            ("검사명", exam.exam_name),
+            ("검사일시", exam_time),
+            ("접수번호", exam.accession_no),
+            ("의뢰과", exam.department),
         ]
-        rows_html = "".join(
-            f'<div class="pacs-abs pacs-d-label" style="top:calc({150 + 28 * i} * var(--u))">{_esc(label)}</div>'
-            f'<div class="pacs-abs pacs-d-value{" is-strong" if strong else ""}" '
-            f'style="top:calc({150 + 28 * i} * var(--u))">{_esc(value or "-")}</div>'
-            for i, (label, value, strong) in enumerate(fields)
-        )
-        st.html(
-            '<div class="pacs-detail">'
-            '<div class="pacs-abs pacs-d-title">검사 상세</div>'
-            '<div class="pacs-abs pacs-d-line is-top"></div>'
-            f'<div class="pacs-abs pacs-d-name">{_esc(exam.patient_name)}</div>'
-            f'<div class="pacs-abs pacs-d-badge">{_badge(exam.status)}</div>'
-            f'<div class="pacs-abs pacs-d-meta">{_esc(_patient_meta(exam))}  /  {_esc(exam.patient_id)}</div>'
-            '<div class="pacs-abs pacs-d-line" style="top:calc(132 * var(--u))"></div>'
-            f"{rows_html}"
-            '<div class="pacs-abs pacs-d-line" style="top:calc(440 * var(--u))"></div>'
-            "</div>"
-        )
+        _text("pacs_list_dname", exam.patient_name)
+        _text(f"pacs_list_dbadge_{_badge_kind(exam.status)}", exam.status, align="center")
+        _text("pacs_list_dmeta", f"{_patient_meta(exam)}  /  {exam.patient_id}")
+        for index, (label, value) in enumerate(fields):
+            _text(f"pacs_list_dlabel_{index}", label)
+            _text(f"pacs_list_dvalue_{index}", value or "-")
+
         # 수정 버튼은 등록 담당자에게만 보이고, 본인이 등록한 수정 가능 상태의 검사에서만 누를 수 있습니다.
         if is_registrar(user):
             allowed = can_edit(user, exam)
@@ -898,11 +994,7 @@ def render(user: CurrentUser) -> ExamListEvent | None:
         _render_sidebar()
         _render_header(user)
         with st.container(key="pacs_list_main"):
-            with st.container(key="pacs_list_title"):
-                st.html(
-                    '<div class="pacs-title">검사 목록</div>'
-                    '<div class="pacs-subtitle">환자의 검사 영상을 확인하고 판독 업무를 시작하세요.</div>'
-                )
+            _render_title()
             _render_stats(exams)
             _render_filters()
             _render_count(len(rows), condition)
