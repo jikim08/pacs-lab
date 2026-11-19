@@ -39,3 +39,21 @@ def apply_median(image: np.ndarray, *, kernel_size: int = 5) -> np.ndarray:
     ):
         raise ValidationError("Median 필터 크기는 3 이상 15 이하인 홀수여야 합니다.")
     return cv2.medianBlur(image, int(kernel_size))
+
+
+def apply_canny(
+    image: np.ndarray, *, low_threshold: int = 10, high_threshold: int = 30
+) -> np.ndarray:
+    """Smooth with a 5 × 5 Gaussian kernel before detecting edges."""
+    validate_grayscale_image(image)
+    if (
+        isinstance(low_threshold, bool)
+        or isinstance(high_threshold, bool)
+        or not isinstance(low_threshold, Integral)
+        or not isinstance(high_threshold, Integral)
+        or not 0 <= low_threshold < high_threshold <= 255
+    ):
+        raise ValidationError("Canny 임계값은 0 이상 255 이하이며 하한이 상한보다 작아야 합니다.")
+
+    smoothed = cv2.GaussianBlur(image, (5, 5), sigmaX=0)
+    return cv2.Canny(smoothed, int(low_threshold), int(high_threshold))

@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from src.exception import ValidationError
-from src.processing.algorithm import apply_clahe, apply_median
+from src.processing.algorithm import apply_canny, apply_clahe, apply_median
 from src.processing.image_io import decode_image, encode_png
 
 
@@ -79,3 +79,22 @@ class MedianTest(unittest.TestCase):
         source = np.zeros((16, 16), dtype=np.uint8)
         with self.assertRaises(ValidationError):
             apply_median(source, kernel_size=4)
+
+
+class CannyTest(unittest.TestCase):
+    def test_thresholds_control_detection_of_a_faint_edge(self):
+        source = np.full((32, 32), 50, dtype=np.uint8)
+        source[:, 16:] = 65
+        before = source.copy()
+
+        detected = apply_canny(source, low_threshold=10, high_threshold=20)
+        filtered = apply_canny(source, low_threshold=50, high_threshold=100)
+        self.assertGreater(np.count_nonzero(detected), 0)
+        self.assertEqual(np.count_nonzero(filtered), 0)
+        self.assertTrue(set(np.unique(detected)).issubset({0, 255}))
+        np.testing.assert_array_equal(source, before)
+
+    def test_rejects_equal_thresholds(self):
+        source = np.zeros((16, 16), dtype=np.uint8)
+        with self.assertRaises(ValidationError):
+            apply_canny(source, low_threshold=30, high_threshold=30)
