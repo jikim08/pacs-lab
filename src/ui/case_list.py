@@ -5,6 +5,10 @@
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
 다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있습니다.
+
+app.py에서 함께 쓰는 함수:
+- ``reset_state()``: 로그아웃할 때 호출. 이 화면이 세션에 저장한 검색 조건·선택·목록을 모두 지웁니다.
+- ``refresh_exams()``: 검사 등록·수정·배정 후 호출. 다음 화면 표시 때 목록을 새로 불러옵니다.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -37,6 +42,20 @@ MODALITY_OPTIONS = ("CT", "MR", "CR", "US")
 ALL = "전체"
 DEFAULT_RANGE_DAYS = 7  # 검사일 기본값: 오늘을 포함한 최근 7일
 
+# 같은 사용자 화면에서 이 시간(초) 안에는 검사 목록을 다시 불러오지 않습니다.
+# 줄 선택처럼 화면이 다시 그려질 때마다 서버(Firestore)를 조회하지 않기 위해서입니다.
+EXAM_CACHE_SECONDS = 30
+
+# ── 화면 이동 이벤트 (render가 돌려주는 ExamListEvent.kind / target 값) ─────────────
+
+EVENT_OPEN_VIEWER = "open_viewer"  # 영상 뷰어 버튼 (case_id 포함)
+EVENT_EDIT = "edit"  # 수정 버튼 (case_id 포함)
+EVENT_NAVIGATE = "navigate"  # 왼쪽 메뉴 (target 포함)
+EVENT_LOGOUT = "logout"  # 로그아웃 버튼
+
+TARGET_CASE_REGISTER = "case_register"  # 검사 등록 화면
+TARGET_REVIEW_ASSIGN = "review_assign"  # 검토 배정 화면
+
 # ── 안내 문구 (디자인 확정 전 임시 문구) ──────────────────────────────────────────
 
 MSG_NO_RESULT = "조건에 맞는 검사가 없습니다. 검색 조건을 변경해 보세요."
@@ -46,7 +65,10 @@ MSG_EDIT_NOT_ALLOWED = "본인이 등록한 미배정 검사만 수정할 수 �
 MSG_INVALID_DATES = "검사일 시작일이 종료일보다 늦을 수 없습니다."
 
 # ── 세션 상태 키 ─────────────────────────────────────────────────────────────
+# 이 화면이 세션에 저장하는 값은 모두 _STATE_PREFIX로 시작합니다(reset_state가 이 이름으로 한꺼번에 지움).
 
+_STATE_PREFIX = "_pacs_list_"
+_EXAMS_CACHE_KEY = "_pacs_list_exams_cache"
 _APPLIED_FILTER_KEY = "_pacs_list_applied_filter"
 _FILTER_VERSION_KEY = "_pacs_list_filter_version"
 _SELECTED_KEY = "_pacs_list_selected_case"
@@ -98,9 +120,9 @@ class SearchFilter:
 class ExamListEvent:
     """사용자가 다른 화면으로 이동하려 할 때 render가 돌려주는 값."""
 
-    kind: str  # "open_viewer" | "edit" | "navigate" | "logout"
+    kind: str  # EVENT_OPEN_VIEWER | EVENT_EDIT | EVENT_NAVIGATE | EVENT_LOGOUT
     case_id: str | None = None
-    target: str | None = None  # navigate 대상: "case_register" | "review_assign"
+    target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_REGISTER | TARGET_REVIEW_ASSIGN
 
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
@@ -131,6 +153,36 @@ def load_exams() -> list[ExamRecord]:
             created_by=_PREVIEW_USER.uid,
         )
     ]
+
+
+def _get_exams() -> tuple[list[ExamRecord], bool]:
+    """세션 캐시를 거쳐 검사 목록을 가져옵니다. (목록, 불러오기 실패 여부)를 돌려줍니다.
+
+    캐시는 사용자 세션마다 따로 저장되므로 다른 사용자의 목록과 섞이지 않습니다.
+    불러오기에 실패하면 캐시에 남기지 않아, 다음 화면 표시 때 다시 시도합니다.
+    """
+    cached = st.session_state.get(_EXAMS_CACHE_KEY)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < EXAM_CACHE_SECONDS:
+        return cached[1], False
+    try:
+        exams = load_exams()
+    except Exception:
+        _logger.exception("검사 목록 불러오기 실패")
+        return [], True
+    st.session_state[_EXAMS_CACHE_KEY] = (now, exams)
+    return exams, False
+
+
+def refresh_exams() -> None:
+    """저장해 둔 검사 목록을 지워, 다음 화면 표시 때 새로 불러오게 합니다(등록·수정·배정 후 호출)."""
+    st.session_state.pop(_EXAMS_CACHE_KEY, None)
+
+
+def reset_state() -> None:
+    """이 화면이 세션에 저장한 값(검색 조건, 선택, 필터 칸, 목록 캐시 등)을 모두 지웁니다(로그아웃 시 호출)."""
+    for key in [k for k in st.session_state.keys() if str(k).startswith(_STATE_PREFIX)]:
+        del st.session_state[key]
 
 
 # ── 검색·정렬·권한 ───────────────────────────────────────────────────────────
@@ -751,6 +803,7 @@ def _on_search() -> None:
     )
     state[_FILTER_VERSION_KEY] = state.get(_FILTER_VERSION_KEY, 0) + 1
     state.pop(_SELECTED_KEY, None)
+    refresh_exams()  # 검색할 때는 최신 목록으로 다시 불러옵니다.
 
 
 # ── 화면 그리기 ──────────────────────────────────────────────────────────────
@@ -791,9 +844,15 @@ def _render_sidebar() -> None:
         with st.container(key="pacs_list_menu_list"):
             st.button("검사 목록", key="pacs_list_nav_list", width="stretch")
         with st.container(key="pacs_list_menu_register"):
-            st.button("검사 등록", key="pacs_list_nav_register", width="stretch", on_click=_emit, args=("navigate", None, "case_register"))
+            st.button(
+                "검사 등록", key="pacs_list_nav_register", width="stretch",
+                on_click=_emit, args=(EVENT_NAVIGATE, None, TARGET_CASE_REGISTER),
+            )
         with st.container(key="pacs_list_menu_review"):
-            st.button("검토 배정", key="pacs_list_nav_review", width="stretch", on_click=_emit, args=("navigate", None, "review_assign"))
+            st.button(
+                "검토 배정", key="pacs_list_nav_review", width="stretch",
+                on_click=_emit, args=(EVENT_NAVIGATE, None, TARGET_REVIEW_ASSIGN),
+            )
         with st.container(key="pacs_list_server"):
             _text("pacs_list_server_title", "서버 연결 정상")
             _text("pacs_list_server_sub", "DICOM 서비스 운영 중")
@@ -815,7 +874,7 @@ def _render_header(user: CurrentUser) -> None:
             _text("pacs_list_user_name", user.name)
         _render_clock()
         with st.container(key="pacs_list_logout"):
-            st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=("logout",))
+            st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=(EVENT_LOGOUT,))
 
 
 def _render_title() -> None:
@@ -957,11 +1016,12 @@ def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
                     disabled=not allowed,
                     help=None if allowed else MSG_EDIT_NOT_ALLOWED,
                     on_click=_emit,
-                    args=("edit", exam.case_id),
+                    args=(EVENT_EDIT, exam.case_id),
                 )
         with st.container(key="pacs_list_viewer"):
             st.button(
-                "영상 뷰어", key="pacs_list_viewer_button", width="stretch", on_click=_emit, args=("open_viewer", exam.case_id)
+                "영상 뷰어", key="pacs_list_viewer_button", width="stretch",
+                on_click=_emit, args=(EVENT_OPEN_VIEWER, exam.case_id),
             )
 
 
@@ -973,12 +1033,7 @@ def render(user: CurrentUser) -> ExamListEvent | None:
     if notice:
         st.toast(notice)
 
-    load_failed = False
-    try:
-        exams = load_exams()
-    except Exception:
-        _logger.exception("검사 목록 불러오기 실패")
-        exams, load_failed = [], True
+    exams, load_failed = _get_exams()
 
     condition = st.session_state.get(_APPLIED_FILTER_KEY) or default_filter()
     rows = filter_exams(exams, condition)
@@ -1008,12 +1063,16 @@ if __name__ == "__main__":
     # 단독 실행 시 샘플 등록 담당자로 화면을 미리 봅니다. 화면 이동은 app.py에서 처리할 예정이라 안내만 띄웁니다.
     st.set_page_config(page_title="PACS 검사 목록", layout="wide")
     event = render(_PREVIEW_USER)
-    if event is not None:
+    if event is not None and event.kind == EVENT_LOGOUT:
+        # 로그아웃 동작 미리보기: 이 화면의 세션 값을 지우고 처음 상태로 다시 그립니다.
+        reset_state()
+        st.session_state[_NOTICE_KEY] = "검색 조건과 선택을 초기화했습니다. 로그인 화면 이동은 app.py 연결 후 동작합니다."
+        st.rerun()
+    elif event is not None:
         preview_messages = {
-            "edit": "수정 화면은 준비 중입니다.",
-            "open_viewer": "영상 뷰어 화면은 준비 중입니다.",
-            "logout": "로그아웃은 app.py 연결 후 동작합니다.",
+            EVENT_EDIT: "수정 화면은 준비 중입니다.",
+            EVENT_OPEN_VIEWER: "영상 뷰어 화면은 준비 중입니다.",
         }
-        targets = {"case_register": "검사 등록", "review_assign": "검토 배정"}
+        targets = {TARGET_CASE_REGISTER: "검사 등록", TARGET_REVIEW_ASSIGN: "검토 배정"}
         message = preview_messages.get(event.kind) or f"{targets.get(event.target or '', '해당')} 화면은 준비 중입니다."
         st.toast(message)
