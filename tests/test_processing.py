@@ -1,4 +1,4 @@
-"""Verification of image conversion and the three whole-image algorithms."""
+"""Verification of image conversion and whole-image processing."""
 
 import unittest
 from io import BytesIO
@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from src.exception import ValidationError
+from src.processing.algorithm import apply_clahe
 from src.processing.image_io import decode_image, encode_png
 
 
@@ -42,3 +43,23 @@ class ImageProcessingTest(unittest.TestCase):
         png = encode_png(np.zeros((12, 12), dtype=np.uint8))
         with self.assertRaises(ValidationError):
             decode_image(png[: len(png) // 2])
+
+
+class CLAHETest(unittest.TestCase):
+    def test_settings_change_contrast_without_overwriting_source(self):
+        source = np.random.default_rng(1234).integers(40, 90, size=(64, 64), dtype=np.uint8)
+        before = source.copy()
+        standard = apply_clahe(source)
+        adjusted = apply_clahe(source, clip_limit=6, tile_grid_size=4)
+
+        self.assertEqual(standard.shape, source.shape)
+        self.assertEqual(standard.dtype, np.uint8)
+        self.assertFalse(np.array_equal(standard, adjusted))
+        np.testing.assert_array_equal(source, before)
+
+    def test_rejects_invalid_contrast_settings(self):
+        source = np.zeros((16, 16), dtype=np.uint8)
+        for settings in ({"clip_limit": float("nan")}, {"tile_grid_size": 8.0}):
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValidationError):
+                    apply_clahe(source, **settings)
