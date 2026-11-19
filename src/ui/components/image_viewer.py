@@ -1,15 +1,22 @@
 """Streamlit tools for inspecting and comparing grayscale images."""
 
+from dataclasses import dataclass
+
 import numpy as np
 import streamlit as st
 from PIL import Image
 
 
 
-def _viewport(image: np.ndarray, size: int) -> Image.Image:
+@dataclass
+class ViewSettings:
+    zoom: int = 100
+
+
+def _viewport(image: np.ndarray, settings: ViewSettings, size: int) -> Image.Image:
     """Render a square viewport without modifying the underlying pixels."""
     rows, columns = image.shape
-    ratio = size / max(rows, columns)
+    ratio = size / max(rows, columns) * settings.zoom / 100
     width = max(1, round(columns * ratio))
     height = max(1, round(rows * ratio))
     left = (size - width) // 2
@@ -18,6 +25,15 @@ def _viewport(image: np.ndarray, size: int) -> Image.Image:
     frame = Image.new("RGB", (size, size), (7, 7, 7))
     frame.paste(raw.resize((width, height), Image.Resampling.BILINEAR), (left, top))
     return frame
+
+
+def _change_zoom(key: str, difference: int) -> None:
+    state: ViewSettings = st.session_state[key]
+    state.zoom = min(225, max(50, state.zoom + difference))
+
+
+def _reset_view(key: str) -> None:
+    st.session_state[key] = ViewSettings()
 
 
 def render_images(
@@ -29,12 +45,25 @@ def render_images(
     active_image: str,
     expanded: bool,
 ) -> None:
-    """Show one chosen image or compare an original/result pair."""
+    """Show an original/result pair with synchronized controls."""
+    state_key = f"{key}-view-settings"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = ViewSettings()
+    settings: ViewSettings = st.session_state[state_key]
     modes = ("원본·결과 비교", "한 장 보기")
-    compare = st.segmented_control(
-        "보기 방식", modes, default=modes[0], required=True,
-        label_visibility="collapsed", key=f"{key}-mode",
-    ) == modes[0]
+    with st.container(horizontal=True, vertical_alignment="center", gap="medium"):
+        compare = st.segmented_control(
+            "보기 방식", modes, default=modes[0], required=True,
+            label_visibility="collapsed", key=f"{key}-mode",
+        ) == modes[0]
+        with st.container(horizontal=True, width="content", vertical_alignment="center", gap="xsmall"):
+            st.button("−", help="영상 축소", key=f"{key}-zoom-out",
+                      on_click=_change_zoom, args=(state_key, -25), disabled=settings.zoom <= 50)
+            st.markdown(f"**{settings.zoom}%**")
+            st.button("+", help="영상 확대", key=f"{key}-zoom-in",
+                      on_click=_change_zoom, args=(state_key, 25), disabled=settings.zoom >= 225)
+        st.button("초기화", help="확대 배율 초기화", key=f"{key}-reset",
+                  on_click=_reset_view, args=(state_key,))
 
     size = 710 if expanded or not compare else 512
     if compare:
@@ -46,11 +75,11 @@ def render_images(
 
     if original_pane is not None:
         original_pane.markdown("**원본 영상**")
-        original_pane.image(_viewport(original, size), width="stretch", output_format="PNG")
+        original_pane.image(_viewport(original, settings, size), width="stretch", output_format="PNG")
     if result_pane is not None:
         if result is not None:
             result_pane.markdown(f"**{result_label}**")
-            result_pane.image(_viewport(result, size), width="stretch", output_format="PNG")
+            result_pane.image(_viewport(result, settings, size), width="stretch", output_format="PNG")
         else:
             with result_pane.container(border=True):
                 st.markdown("**처리 결과**")
@@ -61,9 +90,9 @@ def render_thumbnails(original: np.ndarray, result: np.ndarray | None, *, key: s
     """Render quick targets for the single view and per-image memo."""
     labels = {"original": "원본", "result": "처리 결과"}
     columns = st.columns([1, 1, 2], gap="small")
-    columns[0].image(_viewport(original, 72), width=72)
+    columns[0].image(_viewport(original, ViewSettings(), 72), width=72)
     if result is not None:
-        columns[1].image(_viewport(result, 72), width=72)
+        columns[1].image(_viewport(result, ViewSettings(), 72), width=72)
     options = list(labels) if result is not None else ["original"]
     if st.session_state.get(key) not in options:
         st.session_state[key] = "original"
