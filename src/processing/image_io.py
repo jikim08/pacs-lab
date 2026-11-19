@@ -1,26 +1,61 @@
-"""이미지 파일 검사와 배열 변환."""
+"""Read the team's accepted image formats and encode grayscale results."""
+
+from io import BytesIO
 
 import numpy as np
+from PIL import Image, UnidentifiedImageError
+
+from src.config import MAX_IMAGE_SIZE_BYTES
+from src.exception import ValidationError
+
+
+def validate_grayscale_image(image: np.ndarray) -> None:
+    """Require a nonempty, two-dimensional array of unsigned 8-bit pixels."""
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 2
+        or image.size == 0
+        or image.dtype != np.uint8
+    ):
+        raise ValidationError("영상은 비어 있지 않은 8비트 회색조 배열이어야 합니다.")
 
 
 def decode_image(file_bytes: bytes) -> np.ndarray:
-    """이미지 바이트를 8비트 회색조 배열로 변환한다.
+    """Decode PNG or JPEG bytes into a writable uint8 array (height, width)."""
+    if not isinstance(file_bytes, bytes) or not file_bytes:
+        raise ValidationError("영상 파일이 비어 있거나 올바르지 않습니다.")
+    if len(file_bytes) > MAX_IMAGE_SIZE_BYTES:
+        raise ValidationError("영상 파일이 허용 크기를 초과했습니다.")
 
-    반환:
-        shape: (height, width)
-        dtype: uint8
-        픽셀 범위: 0~255
+    try:
+        with Image.open(BytesIO(file_bytes), formats=("PNG", "JPEG")) as source:
+            pixel_limit = Image.MAX_IMAGE_PIXELS
+            if pixel_limit is not None and source.width * source.height > pixel_limit:
+                raise ValidationError("영상의 픽셀 수가 허용 범위를 초과했습니다.")
+            if getattr(source, "n_frames", 1) != 1:
+                raise ValidationError("한 장으로 된 PNG 또는 JPEG 영상을 선택해 주세요.")
+            source.verify()
 
-    파일 크기, 지원 형식, 디코딩 가능 여부를 검사한다.
-    확장자만으로 파일 형식을 판단하지 않는다.
-    지원하지 않거나 손상된 이미지는 ValidationError를 발생시킨다.
-    """
-    raise NotImplementedError
+        # Pillow requires reopening the image to decode pixels after verify().
+        with Image.open(BytesIO(file_bytes), formats=("PNG", "JPEG")) as source:
+            source.load()
+            if source.format == "PNG" and (
+                source.mode == "I" or source.mode.startswith("I;16")
+            ):
+                return (np.asarray(source, dtype=np.uint16) >> 8).astype(np.uint8)
+            return np.array(source.convert("L"), dtype=np.uint8)
+    except Image.DecompressionBombError as error:
+        raise ValidationError("영상의 픽셀 수가 허용 범위를 초과했습니다.") from error
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as error:
+        raise ValidationError("지원하지 않는 형식이거나 손상된 영상입니다. PNG 또는 JPEG를 선택해 주세요.") from error
 
 
 def encode_png(image: np.ndarray) -> bytes:
-    """8비트 회색조 배열을 PNG 바이트로 변환한다.
-
-    잘못된 배열이나 인코딩 실패는 ValidationError를 발생시킨다.
-    """
-    raise NotImplementedError
+    """Return PNG bytes without changing the input array."""
+    validate_grayscale_image(image)
+    try:
+        with BytesIO() as output:
+            Image.fromarray(image).save(output, format="PNG")
+            return output.getvalue()
+    except (OSError, ValueError) as error:
+        raise ValidationError("영상 결과를 PNG로 변환할 수 없습니다.") from error
