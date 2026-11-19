@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from src.exception import ValidationError
-from src.processing.algorithm import apply_clahe
+from src.processing.algorithm import apply_clahe, apply_median
 from src.processing.image_io import decode_image, encode_png
 
 
@@ -63,3 +63,19 @@ class CLAHETest(unittest.TestCase):
             with self.subTest(settings=settings):
                 with self.assertRaises(ValidationError):
                     apply_clahe(source, **settings)
+
+
+class MedianTest(unittest.TestCase):
+    def test_larger_kernel_removes_a_bright_patch(self):
+        source = np.full((15, 15), 40, dtype=np.uint8)
+        source[6:9, 6:9] = 255
+        before = source.copy()
+
+        self.assertEqual(apply_median(source, kernel_size=3)[7, 7], 255)
+        self.assertEqual(apply_median(source, kernel_size=5)[7, 7], 40)
+        np.testing.assert_array_equal(source, before)
+
+    def test_rejects_even_kernel(self):
+        source = np.zeros((16, 16), dtype=np.uint8)
+        with self.assertRaises(ValidationError):
+            apply_median(source, kernel_size=4)

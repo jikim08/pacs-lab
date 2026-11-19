@@ -27,3 +27,15 @@ def apply_clahe(
     tiles = int(tile_grid_size)
     clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=(tiles, tiles))
     return clahe.apply(image)
+
+
+def apply_median(image: np.ndarray, *, kernel_size: int = 5) -> np.ndarray:
+    """Reduce noise using a square median filter."""
+    validate_grayscale_image(image)
+    if (
+        not isinstance(kernel_size, Integral)
+        or not 3 <= kernel_size <= 15
+        or kernel_size % 2 == 0
+    ):
+        raise ValidationError("Median 필터 크기는 3 이상 15 이하인 홀수여야 합니다.")
+    return cv2.medianBlur(image, int(kernel_size))
