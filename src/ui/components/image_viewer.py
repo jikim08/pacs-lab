@@ -11,6 +11,10 @@ from PIL import Image
 @dataclass
 class ViewSettings:
     zoom: int = 100
+    pan_x: int = 0
+    pan_y: int = 0
+    brightness: int = 100
+    contrast: int = 100
 
 
 def _viewport(image: np.ndarray, settings: ViewSettings, size: int) -> Image.Image:
@@ -19,9 +23,17 @@ def _viewport(image: np.ndarray, settings: ViewSettings, size: int) -> Image.Ima
     ratio = size / max(rows, columns) * settings.zoom / 100
     width = max(1, round(columns * ratio))
     height = max(1, round(rows * ratio))
-    left = (size - width) // 2
-    top = (size - height) // 2
+    left = (size - width) // 2 + round(settings.pan_x * max(0, width - size) / 200)
+    top = (size - height) // 2 + round(settings.pan_y * max(0, height - size) / 200)
+
     raw = Image.fromarray(image)
+    if settings.brightness != 100 or settings.contrast != 100:
+        lut = [
+            max(0, min(255, round(((value - 127.5) * settings.contrast / 100 + 127.5)
+                                 * settings.brightness / 100)))
+            for value in range(256)
+        ]
+        raw = raw.point(lut)
     frame = Image.new("RGB", (size, size), (7, 7, 7))
     frame.paste(raw.resize((width, height), Image.Resampling.BILINEAR), (left, top))
     return frame
@@ -30,10 +42,17 @@ def _viewport(image: np.ndarray, settings: ViewSettings, size: int) -> Image.Ima
 def _change_zoom(key: str, difference: int) -> None:
     state: ViewSettings = st.session_state[key]
     state.zoom = min(225, max(50, state.zoom + difference))
+    if state.zoom <= 100:
+        for axis in ("pan_x", "pan_y"):
+            setattr(state, axis, 0)
+            st.session_state[f"{key}-{axis}"] = 0
 
 
 def _reset_view(key: str) -> None:
     st.session_state[key] = ViewSettings()
+    for name, value in vars(st.session_state[key]).items():
+        if name != "zoom":
+            st.session_state[f"{key}-{name}"] = value
 
 
 def render_images(
@@ -62,8 +81,26 @@ def render_images(
             st.markdown(f"**{settings.zoom}%**")
             st.button("+", help="영상 확대", key=f"{key}-zoom-in",
                       on_click=_change_zoom, args=(state_key, 25), disabled=settings.zoom >= 225)
-        st.button("초기화", help="확대 배율 초기화", key=f"{key}-reset",
+        st.button("초기화", help="확대·이동·밝기·대비 초기화", key=f"{key}-reset",
                   on_click=_reset_view, args=(state_key,))
+
+    with st.expander("영상 이동 · 밝기 · 대비"):
+        if settings.zoom <= 100:
+            st.caption("100%를 넘겨 확대하면 영상 표시 위치를 이동할 수 있어요.")
+        left, right = st.columns(2)
+        for column, attr, label in ((left, "pan_x", "좌우 이동"), (right, "pan_y", "상하 이동")):
+            slider_key = f"{state_key}-{attr}"
+            if slider_key not in st.session_state:
+                st.session_state[slider_key] = getattr(settings, attr)
+            value = column.slider(label, -100, 100, step=5,
+                                  disabled=settings.zoom <= 100, key=slider_key)
+            setattr(settings, attr, value)
+        for column, attr, label in ((left, "brightness", "밝기"), (right, "contrast", "대비")):
+            slider_key = f"{state_key}-{attr}"
+            if slider_key not in st.session_state:
+                st.session_state[slider_key] = getattr(settings, attr)
+            value = column.slider(label, 50, 170, step=5, key=slider_key)
+            setattr(settings, attr, value)
 
     size = 710 if expanded or not compare else 512
     if compare:
