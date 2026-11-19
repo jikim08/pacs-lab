@@ -9,6 +9,7 @@ from PIL import Image
 from src.exception import ValidationError
 from src.processing.algorithm import apply_canny, apply_clahe, apply_median
 from src.processing.image_io import decode_image, encode_png
+from src.processing.roi import analyze_roi
 
 
 class ImageProcessingTest(unittest.TestCase):
@@ -98,3 +99,29 @@ class CannyTest(unittest.TestCase):
         source = np.zeros((16, 16), dtype=np.uint8)
         with self.assertRaises(ValidationError):
             apply_canny(source, low_threshold=30, high_threshold=30)
+
+
+class ROIAnalysisTest(unittest.TestCase):
+    def test_uses_original_coordinates_and_only_the_selected_pixels(self):
+        image = np.array(
+            [[99, 99, 99, 99], [99, 0, 8, 99], [99, 16, 255, 99]],
+            dtype=np.uint8,
+        )
+        roi = {"x": 1, "y": 1, "width": 2, "height": 2}
+        stats = analyze_roi(image, roi)
+        self.assertAlmostEqual(stats["mean"], 69.75)
+        self.assertAlmostEqual(stats["variance"], 11471.1875)
+        self.assertEqual(len(stats["histogram"]), 32)
+        self.assertEqual(sum(stats["histogram"]), 4)
+        self.assertEqual([stats["histogram"][index] for index in (0, 1, 2, 31)], [1] * 4)
+        self.assertEqual(stats["bin_edges"][-1], 256.0)
+
+    def test_bottom_right_pixel_is_valid_and_one_step_past_it_is_not(self):
+        image = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8)
+        roi = {"x": 2, "y": 1, "width": 1, "height": 1}
+        self.assertEqual(analyze_roi(image, roi)["mean"], 6.0)
+
+        for invalid in ({"width": 2}, {"height": 0}, {"x": -1}, {"x": 2.0}, {"y": True}):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValidationError):
+                    analyze_roi(image, {**roi, **invalid})
