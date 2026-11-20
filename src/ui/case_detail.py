@@ -1,16 +1,24 @@
 """Case-level Streamlit controls for comparing and analyzing a selected image."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import streamlit as st
 
 from src.exception import AppError, ValidationError
-from src.models import Case, ProcessingParameters, ROI
+from src.models import Case, CaseStatus, ProcessingParameters, ROI
 from src.processing.image_io import validate_grayscale_image
 from src.processing.roi import analyze_roi
 from src.ui.components.image_viewer import render_histograms, render_images, render_thumbnails
+
+
+@dataclass(frozen=True)
+class ViewerCaseOption:
+    case_id: str
+    patient_id: str
+    status: CaseStatus
+    assigned_to_user: bool = False
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,49 @@ def _render_roi(
     st.button("선택 해제", key=f"{key}-clear-roi", on_click=_set_roi, args=(state, None))
 
 
+def _render_case_list(
+    cases: Sequence[ViewerCaseOption],
+    selected_id: str | None,
+    on_case_change: Callable[[str], None] | None,
+    key: str,
+) -> None:
+    with st.container(border=True):
+        st.markdown("**케이스 목록**")
+        query = st.text_input("환자 ID 또는 케이스 ID 검색", key=f"{key}-case-query").strip().casefold()
+        assigned_only = st.segmented_control(
+            "배정 범위", ("전체", "내게 배정"), default="전체", required=True,
+            label_visibility="collapsed", key=f"{key}-case-assignment",
+        ) == "내게 배정"
+        status = st.selectbox(
+            "검토 상태", ("전체 상태", "검토 대기", "검토 중", "검토 완료"),
+            key=f"{key}-case-status",
+        )
+        matches = [
+            item for item in cases
+            if (not query or query in item.patient_id.casefold() or query in item.case_id.casefold())
+            and (not assigned_only or item.assigned_to_user)
+            and (status == "전체 상태" or item.status == status)
+        ]
+        if not matches:
+            st.caption("조건에 맞는 케이스가 없어요." if cases else "조회 가능한 케이스가 없어요.")
+            return
+        with st.container(height=min(186, len(matches) * 45 + 12), border=False):
+            for item in matches:
+                selected = item.case_id == selected_id
+                if st.button(
+                    f"{item.case_id} · {item.patient_id} · {item.status}",
+                    key=f"{key}-case-option-{item.case_id}", width="stretch",
+                    type="primary" if selected else "secondary",
+                    disabled=on_case_change is None,
+                ) and not selected:
+                    try:
+                        if on_case_change is not None:
+                            on_case_change(item.case_id)
+                            st.rerun()
+                    except AppError as error:
+                        st.error(str(error))
+
+
 def render(
     case: Case | None,
     source: ViewerSource | None,
@@ -153,19 +204,30 @@ def render(
     process_image: ProcessImage | None = None,
     stored_result: ViewerResult | None = None,
     stored_roi: ROI | None = None,
+    cases: Sequence[ViewerCaseOption] | None = None,
+    on_case_change: Callable[[str], None] | None = None,
     start_review: Callable[[], None] | None = None,
 ) -> None:
     """Render an already-authorized case passed by the application layer.
 
     Any processing callback is responsible for authorizing the operation itself.
-    This page holds only the active preview and coordinates in Streamlit session state.
+    Pass only cases the current user is allowed to view. The application loads the selected case.
     """
     st.title("영상 뷰어")
+    expanded = st.toggle("크게 보기", key=f"{key}-expanded")
+    if expanded:
+        workspace, detail = st.container(), st.container()
+    else:
+        workspace, detail = st.columns([3.1, 1.35], gap="medium")
+
+    if cases is not None:
+        with detail:
+            _render_case_list(cases, case["case_id"] if case else None, on_case_change, key)
     if case is None:
-        st.info("검사 목록에서 검사를 선택해 주세요.")
+        workspace.info("검사 목록에서 검사를 선택해 주세요.")
         return
     if source is None:
-        st.info("선택한 검사에 등록된 영상이 없어요.")
+        workspace.info("선택한 검사에 등록된 영상이 없어요.")
         return
 
     try:
@@ -175,7 +237,7 @@ def render(
         if stored_roi is not None:
             analyze_roi(source.pixels, stored_roi)
     except ValidationError as error:
-        st.error(str(error))
+        workspace.error(str(error))
         return
 
     # key is scoped by the integrating screen to the authenticated user/session.
@@ -186,12 +248,6 @@ def render(
     state: AnalysisState = st.session_state[state_key]
     can_analyze = allow_analysis and case["status"] == "검토 중"
     result = (state.result or stored_result) if can_analyze else stored_result
-    expanded = st.toggle("크게 보기", key=f"{key}-expanded")
-    if expanded:
-        workspace, detail = st.container(), st.container()
-    else:
-        workspace, detail = st.columns([3.1, 1.35], gap="medium")
-
     active_key = f"{key}-active-image"
     active = st.session_state.get(active_key, "original") if result else "original"
     selecting_roi = can_analyze and state.selecting_roi
