@@ -4,9 +4,11 @@
 검사 데이터는 지금은 화면 확인용 샘플 1건을 사용합니다. 백엔드가 준비되면 ``load_exams``만 바꾸면 됩니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
-다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있습니다.
+다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있고, 주소 끝에
+``?role=REVIEWER``처럼 역할을 붙이면 그 역할로 볼 수 있습니다(REGISTRAR / REVIEWER / ADMIN).
 
 app.py에서 함께 쓰는 함수:
+- ``current_user_from_profile(profile)``: 로그인으로 확인된 사용자 정보(dict)를 ``render``에 넘길 CurrentUser로 바꿉니다.
 - ``reset_state()``: 로그아웃할 때 호출. 이 화면이 세션에 저장한 검색 조건·선택·목록을 모두 지웁니다.
 - ``refresh_exams()``: 검사 등록·수정·배정 후 호출. 다음 화면 표시 때 목록을 새로 불러옵니다.
 """
@@ -17,6 +19,7 @@ import base64
 import logging
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -41,6 +44,13 @@ EDITABLE_STATUSES = frozenset({STATUS_UNASSIGNED})
 ROLE_REGISTRAR = "REGISTRAR"  # 등록 담당자
 ROLE_REVIEWER = "REVIEWER"  # 검토 담당자
 ROLE_ADMIN = "ADMIN"  # 업무 담당자
+
+# 상단 바에 표시할 역할 이름입니다.
+ROLE_LABELS = {
+    ROLE_REGISTRAR: "등록 담당자",
+    ROLE_REVIEWER: "검토 담당자",
+    ROLE_ADMIN: "업무 담당자",
+}
 
 MODALITY_OPTIONS = ("CT", "MR", "CR", "US")
 ALL = "전체"
@@ -67,6 +77,7 @@ MSG_NO_SELECTION = "목록에서 검사를 선택하면 상세 정보가 표시�
 MSG_LOAD_FAILED = "검사 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
 MSG_EDIT_NOT_ALLOWED = "본인이 등록한 미배정 검사만 수정할 수 있습니다."
 MSG_INVALID_DATES = "검사일 시작일이 종료일보다 늦을 수 없습니다."
+USER_NAME_FALLBACK = "사용자"  # 사용자 정보에 이름이 없을 때 상단 바에 표시
 
 # ── 세션 상태 키 ─────────────────────────────────────────────────────────────
 # 이 화면이 세션에 저장하는 값은 모두 _STATE_PREFIX로 시작합니다(reset_state가 이 이름으로 한꺼번에 지움).
@@ -88,8 +99,8 @@ class CurrentUser:
 
     uid: str
     role: str  # ROLE_REGISTRAR | ROLE_REVIEWER | ROLE_ADMIN (대문자, 로그인 화면에서 확인된 값)
-    name: str
-    department: str
+    name: str  # 비어 있으면 화면에 USER_NAME_FALLBACK을 표시합니다.
+    department: str = ""  # 진료과 이름. 아직 백엔드가 주지 않고 화면에도 표시하지 않습니다.
 
 
 @dataclass(frozen=True)
@@ -127,6 +138,40 @@ class ExamListEvent:
     kind: str  # EVENT_OPEN_VIEWER | EVENT_EDIT | EVENT_NAVIGATE | EVENT_LOGOUT
     case_id: str | None = None
     target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_REGISTER | TARGET_REVIEW_ASSIGN
+
+
+# ── 로그인 사용자 ────────────────────────────────────────────────────────────
+
+def _clean(value: object) -> str:
+    """None은 빈 칸으로, 나머지는 앞뒤 공백을 지운 글자로 바꿉니다."""
+    return "" if value is None else str(value).strip()
+
+# 로그인 결과(백엔드가 준 사전 형태의 데이터)를 검사 목록 화면이 쓰는 CurrentUser 형태로 바꿔 주는 함수
+def current_user_from_profile(profile: Mapping[str, object]) -> CurrentUser:
+    """로그인으로 확인된 사용자 정보(dict)를 이 화면의 CurrentUser로 바꿉니다(app.py에서 호출).
+
+    받은 값만 정리하고 데이터베이스는 조회하지 않습니다.
+    - uid, role: 꼭 필요합니다. 비어 있으면 ValueError를 내므로, app.py는 로그인 화면으로 돌려보내면 됩니다.
+    - role: 앞뒤 공백을 지우고 대문자로 맞춥니다.
+    - name: 없으면 빈 칸으로 두고, 화면에는 USER_NAME_FALLBACK을 표시합니다.
+    - department: 진료과 이름(department_name 또는 department 키). department_id(예: "dept001")는
+      화면에 보여줄 이름이 아니라서 쓰지 않습니다.
+    """
+    uid = _clean(profile.get("uid"))
+    role = _clean(profile.get("role")).upper()
+    if not uid or not role:
+        raise ValueError("로그인 사용자 정보에 uid와 role이 모두 있어야 합니다.")
+    return CurrentUser(
+        uid=uid,
+        role=role,
+        name=_clean(profile.get("name")),
+        department=_clean(profile.get("department_name") or profile.get("department")),
+    )
+
+
+def role_label(user: CurrentUser) -> str:
+    """상단 바에 표시할 역할 이름(예: 등록 담당자)."""
+    return ROLE_LABELS.get(user.role, user.role)
 
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
@@ -461,10 +506,13 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   content:''; position:absolute; left:calc(-36 * var(--u)); top:calc(6 * var(--u));
   width:1px; height:calc(22 * var(--u)); background:#e5e5e5;
 }
-.st-key-pacs_list_user_dept { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
+.st-key-pacs_list_user_role { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#777; }
 .st-key-pacs_list_user_name {
   margin-top:calc(-1 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#222;
 }
+/* 이름이 길어도 로그아웃 버튼을 덮지 않도록 넘치는 부분은 …로 줄입니다. */
+.st-key-pacs_list_user_role, .st-key-pacs_list_user_name { max-width:calc(160 * var(--u)); }
+.st-key-pacs_list_user_role p, .st-key-pacs_list_user_name p { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .st-key-pacs_list_clock {
   right:calc(303 * var(--u)); top:calc(23 * var(--u)); width:auto !important; text-align:right; white-space:nowrap;
   font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#666; font-variant-numeric:tabular-nums;
@@ -874,8 +922,8 @@ def _render_header(user: CurrentUser) -> None:
         _text("pacs_list_crumb_home", "워크스페이스")
         _text("pacs_list_crumb_page", "검사 목록")
         with st.container(key="pacs_list_user"):
-            _text("pacs_list_user_dept", user.department)
-            _text("pacs_list_user_name", user.name)
+            _text("pacs_list_user_role", role_label(user))
+            _text("pacs_list_user_name", user.name or USER_NAME_FALLBACK)
         _render_clock()
         with st.container(key="pacs_list_logout"):
             st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=(EVENT_LOGOUT,))
@@ -1063,10 +1111,18 @@ def render(user: CurrentUser) -> ExamListEvent | None:
     return st.session_state.pop(_EVENT_KEY, None)
 
 
+def _preview_user() -> CurrentUser:
+    """미리보기 사용자. 주소 끝에 ?role=REVIEWER처럼 붙이면 그 역할로 봅니다(없거나 잘못된 값이면 등록 담당자)."""
+    role = _clean(st.query_params.get("role")).upper()
+    if role not in ROLE_LABELS or role == ROLE_REGISTRAR:
+        return _PREVIEW_USER
+    return current_user_from_profile({"uid": f"preview-{role.lower()}", "role": role, "name": _PREVIEW_USER.name})
+
+
 if __name__ == "__main__":
-    # 단독 실행 시 샘플 등록 담당자로 화면을 미리 봅니다. 화면 이동은 app.py에서 처리할 예정이라 안내만 띄웁니다.
+    # 단독 실행 시 샘플 사용자로 화면을 미리 봅니다. 화면 이동은 app.py에서 처리할 예정이라 안내만 띄웁니다.
     st.set_page_config(page_title="PACS 검사 목록", layout="wide")
-    event = render(_PREVIEW_USER)
+    event = render(_preview_user())
     if event is not None and event.kind == EVENT_LOGOUT:
         # 로그아웃 동작 미리보기: 이 화면의 세션 값을 지우고 처음 상태로 다시 그립니다.
         reset_state()
