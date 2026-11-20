@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 
 from src.exception import AppError, ValidationError
-from src.models import Case, CaseStatus, ProcessingParameters, ROI
+from src.models import Case, CaseStatus, ProcessingParameters, ReviewRecord, ROI
 from src.processing.image_io import validate_grayscale_image
 from src.processing.roi import analyze_roi
 from src.ui.components.image_viewer import render_histograms, render_images, render_thumbnails
@@ -37,6 +37,7 @@ class ViewerSource:
 class ViewerResult:
     label: str
     pixels: np.ndarray
+    result_id: str | None = None
 
 
 @dataclass
@@ -48,6 +49,7 @@ class AnalysisState:
 
 
 ProcessImage = Callable[[str, ProcessingParameters], ViewerResult]
+SaveImageMemo = Callable[[str, str | None, str], None]
 PANELS = ("영상처리", "ROI 분석")
 
 
@@ -195,6 +197,67 @@ def _render_case_list(
                         st.error(str(error))
 
 
+def _render_image_memo(
+    key: str,
+    case_id: str,
+    source: ViewerSource,
+    active: str,
+    result: ViewerResult | None,
+    records: Sequence[ReviewRecord],
+    save_memo: SaveImageMemo | None,
+) -> None:
+    result_selected = active == "result" and result is not None
+    result_id = result.result_id if result_selected else None
+    with st.container(border=True):
+        st.markdown("**영상 메모**")
+        st.caption(f"대상 · {result.label if result_selected else source.name}")
+        if result_selected and result_id is None:
+            st.caption("처리 결과를 저장한 뒤 해당 결과에 메모를 남길 수 있어요.")
+            return
+
+        matching = sorted(
+            (
+                record for record in records
+                if record["kind"] == "MEMO" and record["case_id"] == case_id
+                and record["file_id"] == source.file_id
+                and record["processing_result_id"] == result_id
+            ),
+            key=lambda record: record["updated_at"],
+            reverse=True,
+        )
+        saved = matching[0] if matching else None
+        current = saved["content"] if saved else ""
+        target_key = f"{key}-memo-{'stored-' + result_id if result_id else 'source'}"
+        if save_memo is None:
+            if current:
+                st.text(current)
+            else:
+                st.caption("저장된 메모가 없어요.")
+        else:
+            text = st.text_area(
+                "메모 내용", value=current, height=105,
+                placeholder="선택한 영상에 대한 메모",
+                label_visibility="collapsed", key=f"{target_key}-text",
+            )
+            if st.button(
+                "메모 저장", key=f"{target_key}-save",
+                width="stretch", disabled=not text.strip() or text.strip() == current,
+            ):
+                try:
+                    save_memo(source.file_id, result_id, text.strip())
+                    st.rerun()
+                except AppError as error:
+                    st.error(str(error))
+
+        if saved:
+            st.caption(f"작성자 · {saved['author_id']} · {saved['updated_at']:%Y-%m-%d %H:%M}")
+        if len(matching) > 1:
+            with st.expander("이전 메모"):
+                for record in matching[1:]:
+                    st.caption(f"{record['author_id']} · {record['updated_at']:%Y-%m-%d %H:%M}")
+                    st.text(record["content"])
+
+
 def render(
     case: Case | None,
     source: ViewerSource | None,
@@ -206,6 +269,8 @@ def render(
     stored_roi: ROI | None = None,
     cases: Sequence[ViewerCaseOption] | None = None,
     on_case_change: Callable[[str], None] | None = None,
+    review_records: Sequence[ReviewRecord] | None = None,
+    save_memo: SaveImageMemo | None = None,
     start_review: Callable[[], None] | None = None,
 ) -> None:
     """Render an already-authorized case passed by the application layer.
@@ -268,6 +333,12 @@ def render(
             modalities.append(f"{columns} × {rows} px")
             st.caption(" · ".join(modalities))
             st.caption(f"선택 영상 · {result.label if result and active == 'result' else source.name}")
+
+        if review_records is not None or save_memo is not None:
+            _render_image_memo(
+                key, case["case_id"], source, active, result, review_records or (),
+                save_memo if can_analyze else None,
+            )
 
     with workspace:
         with st.container(horizontal=True, vertical_alignment="center", gap="medium"):
