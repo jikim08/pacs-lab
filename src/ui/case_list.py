@@ -36,7 +36,11 @@ STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_DONE)
 
 # 수정할 수 있는 상태입니다. 배정 완료 검사도 수정하게 하려면 STATUS_ASSIGNED를 추가하면 됩니다.
 EDITABLE_STATUSES = frozenset({STATUS_UNASSIGNED})
-REGISTRAR_ROLE = "registrar"
+
+# 사용자 역할입니다. Firestore users 문서의 role 값, models.py의 UserRole과 글자까지 같아야 합니다.
+ROLE_REGISTRAR = "REGISTRAR"  # 등록 담당자
+ROLE_REVIEWER = "REVIEWER"  # 검토 담당자
+ROLE_ADMIN = "ADMIN"  # 업무 담당자
 
 MODALITY_OPTIONS = ("CT", "MR", "CR", "US")
 ALL = "전체"
@@ -83,7 +87,7 @@ class CurrentUser:
     """화면에 필요한 로그인 사용자 정보."""
 
     uid: str
-    role: str  # "registrar" | "reviewer" | "manager" (대소문자 구분 없음)
+    role: str  # ROLE_REGISTRAR | ROLE_REVIEWER | ROLE_ADMIN (대문자, 로그인 화면에서 확인된 값)
     name: str
     department: str
 
@@ -127,7 +131,7 @@ class ExamListEvent:
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
 
-_PREVIEW_USER = CurrentUser(uid="preview-registrar", role=REGISTRAR_ROLE, name="김의사", department="영상의학과")
+_PREVIEW_USER = CurrentUser(uid="preview-registrar", role=ROLE_REGISTRAR, name="김의사", department="영상의학과")
 
 
 def load_exams() -> list[ExamRecord]:
@@ -216,7 +220,7 @@ def filter_exams(exams: list[ExamRecord], condition: SearchFilter) -> list[ExamR
 
 
 def is_registrar(user: CurrentUser) -> bool:
-    return user.role.strip().lower() == REGISTRAR_ROLE
+    return user.role == ROLE_REGISTRAR
 
 
 def can_edit(user: CurrentUser, exam: ExamRecord) -> bool:
