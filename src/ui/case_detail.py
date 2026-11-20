@@ -58,7 +58,7 @@ SaveImageMemo = Callable[[str, str | None, str], None]
 SaveViewerResult = Callable[[ViewerResult, str, ProcessingParameters, ROI | None], ViewerResult]
 SaveViewerROI = Callable[[ROI, str | None], None]
 OpenViewerResult = Callable[[str], ViewerResult]
-PANELS = ("영상처리", "ROI 분석", "이력")
+PANELS = ("영상처리", "ROI 분석", "요약 리포트", "이력")
 
 
 def _toggle_roi(key: str, state: AnalysisState) -> None:
@@ -360,6 +360,41 @@ def _render_image_memo(
                     st.text(record["content"])
 
 
+def _render_report(
+    key: str,
+    case_id: str,
+    records: Sequence[ReviewRecord],
+    save_report: Callable[[str], None] | None,
+) -> None:
+    reports = sorted(
+        (record for record in records if record["kind"] == "REPORT" and record["case_id"] == case_id),
+        key=lambda record: record["updated_at"],
+        reverse=True,
+    )
+    saved = reports[0] if reports else None
+    content = saved["content"] if saved else ""
+    if save_report is None:
+        if saved:
+            st.text(content)
+        else:
+            st.caption("저장된 리포트가 없어요.")
+    else:
+        draft = st.text_area("케이스 요약", value=content, height=130, key=f"{key}-report-text")
+        if st.button("리포트 저장", key=f"{key}-save-report", disabled=not draft.strip() or draft.strip() == content):
+            try:
+                save_report(draft.strip())
+                st.rerun()
+            except AppError as error:
+                st.error(str(error))
+    if saved:
+        st.caption(f"작성자 · {saved['author_id']} · {saved['updated_at']:%Y-%m-%d %H:%M}")
+    if len(reports) > 1:
+        with st.expander("이전 리포트"):
+            for record in reports[1:]:
+                st.caption(f"{record['author_id']} · {record['updated_at']:%Y-%m-%d %H:%M}")
+                st.text(record["content"])
+
+
 def render(
     case: Case | None,
     source: ViewerSource | None,
@@ -378,6 +413,9 @@ def render(
     save_roi: SaveViewerROI | None = None,
     open_result: OpenViewerResult | None = None,
     start_review: Callable[[], None] | None = None,
+    save_report: Callable[[str], None] | None = None,
+    complete_review: Callable[[], None] | None = None,
+    completion_block_reason: str | None = None,
 ) -> None:
     """Render an already-authorized case passed by the application layer.
 
@@ -460,6 +498,18 @@ def render(
                     st.rerun()
                 except AppError as error:
                     st.error(str(error))
+            if can_analyze and complete_review is not None:
+                pending = state.result is not None and state.result.result_id is None
+                reason = completion_block_reason or ("처리 결과 저장 필요" if pending else None)
+                with st.container(width="content", gap="xxsmall"):
+                    if st.button("검토 완료", type="primary", key=f"{key}-complete", disabled=bool(reason)):
+                        try:
+                            complete_review()
+                            st.rerun()
+                        except AppError as error:
+                            st.error(str(error))
+                    if reason:
+                        st.caption(reason)
         roi = render_images(
             source.pixels, result.pixels if result else None,
             result.label if result else "", key=key, active_image=active,
@@ -480,6 +530,9 @@ def render(
                     original_stats = analyze_roi(source.pixels, saved_roi)
                     result_stats = analyze_roi(result.pixels, saved_roi) if result else None
                     render_histograms(original_stats, result_stats)
+            if review_records is not None:
+                with st.expander("요약 리포트"):
+                    _render_report(key, case["case_id"], review_records, None)
             if processing_records is not None:
                 with st.container(border=True):
                     st.markdown("**이력**")
@@ -497,6 +550,8 @@ def render(
             )
             if panel == "ROI 분석":
                 _render_roi(key, source.pixels, result, state, save_roi)
+            elif panel == "요약 리포트":
+                _render_report(key, case["case_id"], review_records or (), save_report)
             elif panel == "이력":
                 matching = [item for item in processing_records or ()
                             if item["input_file_id"] == source.file_id
