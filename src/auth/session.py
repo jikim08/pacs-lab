@@ -2,6 +2,28 @@
 """Streamlit 로그인 세션 관리."""
 
 from src.models import User
+from src.exception import AuthenticationError, PermissionDeniedError
+from firebase_auth import verify_token
+from src.repositories import get_user
+
+def _load_user(id_token: str) -> User:
+    try:
+        identity = verify_token(id_token)
+    except Exception as error:
+        raise AuthenticationError("로그인 상태를 확인할 수 없습니다.") from error
+
+    profile = get_user(identity["uid"])
+
+    if profile is None:
+        raise PermissionDeniedError("등록된 사용자 정보가 없습니다.")
+
+    return {
+        **profile,
+        "uid" : identity["uid"],
+    }
+
+def save_session(id_token: str) -> None:
+    _load_user(id_token)
 
 
 def get_current_user() -> User | None:

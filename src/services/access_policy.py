@@ -10,7 +10,7 @@ def require_case_registration(user_id: str) -> None:
     if user is None:
         raise PermissionError("등록된 사용자 정보가 없습니다.")
 
-    if user.get("role") != "registrar":
+    if user.get("role") != "REGISTRAR":
         raise PermissionError("등록 담당자만 케이스를 등록할 수 있습니다.")
 
 
@@ -39,7 +39,7 @@ def get_current_user(id_token: str) -> dict:
         raise PermissionError("등록된 사용자 정보가 없습니다.")
 
     # 3. 앱에서 허용하는 역할인지 확인
-    if profile.get("role") not in {"registrar", "reviewer", "manager"}:
+    if profile.get("role") not in {"REGISTRAR", "REVIEWER", "ADMIN"}:
         raise PermissionError("사용자 역할 설정을 확인하세요.")
 
     return {
