@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 
 from src.exception import AppError, ValidationError
-from src.models import Case, CaseStatus, ProcessingParameters, ReviewRecord, ROI
+from src.models import Case, CaseStatus, ProcessingParameters, ProcessingResult, ReviewRecord, ROI
 from src.processing.image_io import validate_grayscale_image
 from src.processing.roi import analyze_roi
 from src.ui.components.image_viewer import render_histograms, render_images, render_thumbnails
@@ -45,12 +45,20 @@ class AnalysisState:
     result: ViewerResult | None = None
     roi: ROI | None = None
     selecting_roi: bool = False
+    algorithm: str | None = None
+    parameters: ProcessingParameters | None = None
+    opened_result: ViewerResult | None = None
+    opened_roi: ROI | None = None
+    last_saved_roi: tuple[str | None, int, int, int, int] | None = None
     roi_revision: int = 0
 
 
 ProcessImage = Callable[[str, ProcessingParameters], ViewerResult]
 SaveImageMemo = Callable[[str, str | None, str], None]
-PANELS = ("영상처리", "ROI 분석")
+SaveViewerResult = Callable[[ViewerResult, str, ProcessingParameters, ROI | None], ViewerResult]
+SaveViewerROI = Callable[[ROI, str | None], None]
+OpenViewerResult = Callable[[str], ViewerResult]
+PANELS = ("영상처리", "ROI 분석", "이력")
 
 
 def _toggle_roi(key: str, state: AnalysisState) -> None:
@@ -77,6 +85,7 @@ def _render_processing(
     original: np.ndarray,
     state: AnalysisState,
     process_image: ProcessImage,
+    save_result: SaveViewerResult | None,
 ) -> None:
     st.caption("처리 범위 · 원본 영상 전체")
     algorithm = st.selectbox("알고리즘", ("CLAHE", "Median", "Canny"), key=f"{key}-algorithm")
@@ -106,19 +115,53 @@ def _render_processing(
                 "상한 임계값", min_value=1, max_value=255, value=30, key=f"{key}-canny-high",
             ),
         }
-    if st.button("영상처리 실행", type="primary", key=f"{key}-run"):
+    pending = state.result is not None and state.result.result_id is None
+    same_settings = state.algorithm == algorithm and state.parameters == parameters
+    if pending and not same_settings:
+        st.caption("다른 설정을 실행하면 미저장 미리보기가 교체돼요.")
+    if st.button("영상처리 실행", type="primary", key=f"{key}-run", disabled=pending and same_settings):
         try:
             with st.spinner("영상 처리 중"):
                 result = process_image(algorithm, parameters)
                 _valid_result(result, original)
             state.result = result
+            state.algorithm = algorithm
+            state.parameters = dict(parameters)
+            state.opened_result = None
+            state.opened_roi = None
             st.rerun()
         except AppError as error:
             st.error(str(error))
 
 
+    if pending:
+        st.caption("현재 결과 · 미저장")
+        with st.container(horizontal=True):
+            if save_result is not None and st.button("처리 결과 저장", key=f"{key}-save-result"):
+                try:
+                    if state.result is None or state.algorithm is None or state.parameters is None:
+                        raise ValidationError("저장할 처리 결과가 없어요.")
+                    saved = save_result(state.result, state.algorithm, dict(state.parameters),
+                                        state.roi.copy() if state.roi else None)
+                    _valid_result(saved, original)
+                    if not saved.result_id:
+                        raise ValidationError("저장된 결과의 ID를 확인하지 못했어요.")
+                    state.result = saved
+                    st.rerun()
+                except AppError as error:
+                    st.error(str(error))
+            if st.button("미리보기 지우기", key=f"{key}-discard-result"):
+                state.result = None
+                state.algorithm = None
+                state.parameters = None
+                st.rerun()
+    elif state.result is not None:
+        st.caption(f"현재 결과 · {state.result.label}")
+
+
 def _render_roi(
     key: str, original: np.ndarray, result: ViewerResult | None, state: AnalysisState,
+    save_roi: SaveViewerROI | None,
 ) -> None:
     rows, columns = original.shape
     roi = state.roi
@@ -151,7 +194,66 @@ def _render_roi(
     if result_stats is not None:
         second.caption(f"처리 결과 · 평균 {result_stats['mean']:.1f} · 분산 {result_stats['variance']:.1f}")
     render_histograms(original_stats, result_stats)
-    st.button("선택 해제", key=f"{key}-clear-roi", on_click=_set_roi, args=(state, None))
+    with st.container(horizontal=True):
+        st.button("선택 해제", key=f"{key}-clear-roi", on_click=_set_roi, args=(state, None))
+        if save_roi is not None:
+            result_id = result.result_id if result else None
+            fingerprint = (result_id, roi["x"], roi["y"], roi["width"], roi["height"])
+            if st.button(
+                "ROI 기록", key=f"{key}-save-roi",
+                disabled=(result is not None and result_id is None) or state.last_saved_roi == fingerprint,
+                help="처리 결과의 ROI는 결과 저장 후 기록할 수 있어요.",
+            ):
+                try:
+                    save_roi(roi.copy(), result_id)
+                    state.last_saved_roi = fingerprint
+                    st.rerun()
+                except AppError as error:
+                    st.error(str(error))
+
+
+def _render_result_history(
+    key: str,
+    original: np.ndarray,
+    records: Sequence[ProcessingResult],
+    open_result: OpenViewerResult | None,
+    state: AnalysisState,
+    *,
+    can_edit: bool,
+) -> None:
+    if not records:
+        st.caption("저장된 처리 기록이 없어요.")
+        return
+    pending = can_edit and state.result is not None and state.result.result_id is None
+    if pending:
+        st.caption("미저장 결과를 저장하거나 지운 뒤 이전 결과를 열 수 있어요.")
+    for record in sorted(records, key=lambda item: item["created_at"], reverse=True):
+        result_id = record["processing_result_id"]
+        with st.expander(f"{record['processing_type_id']} · {record['created_at']:%Y-%m-%d %H:%M}"):
+            params = " · ".join(f"{name} {value}" for name, value in record["parameters"].items())
+            st.caption(f"실행자 · {record['performed_by']} · 버전 {record['algorithm_version']}")
+            if params:
+                st.text(params)
+            roi = record["roi"]
+            if roi:
+                st.caption(f"ROI · X {roi['x']}, Y {roi['y']} · {roi['width']} × {roi['height']} px")
+            stats = record["statistics"]
+            if stats:
+                st.caption(f"평균 {stats['mean']:.1f} · 분산 {stats['variance']:.1f}")
+            if open_result is not None and record["status"] == "COMPLETED":
+                if st.button("이전 결과 열기", key=f"{key}-history-{result_id}", disabled=pending):
+                    try:
+                        result = open_result(result_id)
+                        _valid_result(result, original)
+                        if roi is not None:
+                            analyze_roi(original, roi)
+                        state.opened_result = result
+                        state.opened_roi = roi
+                        state.result = None
+                        _set_roi(state, roi.copy() if roi else None)
+                        st.rerun()
+                    except AppError as error:
+                        st.error(str(error))
 
 
 def _render_case_list(
@@ -271,6 +373,10 @@ def render(
     on_case_change: Callable[[str], None] | None = None,
     review_records: Sequence[ReviewRecord] | None = None,
     save_memo: SaveImageMemo | None = None,
+    processing_records: Sequence[ProcessingResult] | None = None,
+    save_result: SaveViewerResult | None = None,
+    save_roi: SaveViewerROI | None = None,
+    open_result: OpenViewerResult | None = None,
     start_review: Callable[[], None] | None = None,
 ) -> None:
     """Render an already-authorized case passed by the application layer.
@@ -312,7 +418,9 @@ def render(
         st.session_state[state_key] = AnalysisState(roi=stored_roi.copy() if stored_roi else None)
     state: AnalysisState = st.session_state[state_key]
     can_analyze = allow_analysis and case["status"] == "검토 중"
-    result = (state.result or stored_result) if can_analyze else stored_result
+    saved_selection = state.opened_result or stored_result
+    saved_roi = state.opened_roi if state.opened_result else stored_roi
+    result = (state.result or saved_selection) if can_analyze else saved_selection
     active_key = f"{key}-active-image"
     active = st.session_state.get(active_key, "original") if result else "original"
     selecting_roi = can_analyze and state.selecting_roi
@@ -355,7 +463,7 @@ def render(
         roi = render_images(
             source.pixels, result.pixels if result else None,
             result.label if result else "", key=key, active_image=active,
-            roi=state.roi if can_analyze else stored_roi, expanded=expanded,
+            roi=state.roi if can_analyze else saved_roi, expanded=expanded,
             roi_enabled=can_analyze, selecting_roi=selecting_roi,
             on_toggle_roi=lambda: _toggle_roi(key, state),
             roi_revision=state.roi_revision,
@@ -367,11 +475,18 @@ def render(
 
         if not can_analyze:
             st.caption("조회 전용")
-            if stored_roi is not None:
+            if saved_roi is not None:
                 with st.expander("저장된 ROI 분석"):
-                    original_stats = analyze_roi(source.pixels, stored_roi)
-                    result_stats = analyze_roi(result.pixels, stored_roi) if result else None
+                    original_stats = analyze_roi(source.pixels, saved_roi)
+                    result_stats = analyze_roi(result.pixels, saved_roi) if result else None
                     render_histograms(original_stats, result_stats)
+            if processing_records is not None:
+                with st.container(border=True):
+                    st.markdown("**이력**")
+                    matching = [item for item in processing_records
+                                if item["input_file_id"] == source.file_id
+                                and item["case_id"] == case["case_id"]]
+                    _render_result_history(key, source.pixels, matching, open_result, state, can_edit=False)
             return
         panel_key = f"{key}-panel"
         if panel_key not in st.session_state:
@@ -381,8 +496,13 @@ def render(
                 "영상 작업", PANELS, required=True, key=panel_key, label_visibility="collapsed",
             )
             if panel == "ROI 분석":
-                _render_roi(key, source.pixels, result, state)
+                _render_roi(key, source.pixels, result, state, save_roi)
+            elif panel == "이력":
+                matching = [item for item in processing_records or ()
+                            if item["input_file_id"] == source.file_id
+                            and item["case_id"] == case["case_id"]]
+                _render_result_history(key, source.pixels, matching, open_result, state, can_edit=True)
             elif process_image is not None:
-                _render_processing(key, source.pixels, state, process_image)
+                _render_processing(key, source.pixels, state, process_image, save_result)
             else:
                 st.caption("처리 서비스 연결 후 실행할 수 있어요.")
