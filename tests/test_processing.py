@@ -10,6 +10,7 @@ from src.exception import ValidationError
 from src.processing.algorithm import apply_canny, apply_clahe, apply_median
 from src.processing.image_io import decode_image, encode_png
 from src.processing.roi import analyze_roi
+from src.services.processing import run_processing
 
 
 class ImageProcessingTest(unittest.TestCase):
@@ -99,6 +100,33 @@ class CannyTest(unittest.TestCase):
         source = np.zeros((16, 16), dtype=np.uint8)
         with self.assertRaises(ValidationError):
             apply_canny(source, low_threshold=30, high_threshold=30)
+
+
+class ProcessingServiceTest(unittest.TestCase):
+    def test_runs_each_algorithm_with_the_selected_settings(self):
+        original = np.random.default_rng(42).integers(0, 256, size=(64, 64), dtype=np.uint8)
+        before = original.copy()
+        for name, function, parameters in (
+            ("CLAHE", apply_clahe, {"clip_limit": 5.0, "tile_grid_size": 4}),
+            ("Median", apply_median, {"kernel_size": 7}),
+            ("Canny", apply_canny, {"low_threshold": 50, "high_threshold": 100}),
+        ):
+            with self.subTest(algorithm=name):
+                result = run_processing(original, name, parameters)
+                np.testing.assert_array_equal(result, function(before, **parameters))
+                self.assertFalse(np.shares_memory(result, original))
+        np.testing.assert_array_equal(original, before)
+
+    def test_invalid_algorithm_or_settings_raise_validation_error(self):
+        original = np.zeros((16, 16), dtype=np.uint8)
+        for name, parameters in (
+            ("Unknown", {}),
+            ("CLAHE", {"kernel_size": 3}),
+            ("Canny", {"low_threshold": 30, "high_threshold": 30}),
+        ):
+            with self.subTest(algorithm=name, parameters=parameters):
+                with self.assertRaises(ValidationError):
+                    run_processing(original, name, parameters)
 
 
 class ROIAnalysisTest(unittest.TestCase):
