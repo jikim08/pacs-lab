@@ -62,7 +62,7 @@ ROLE_LABELS = {
 
 MODALITY_OPTIONS = ("CT", "MR", "CR", "US")
 ALL = "전체"
-DEFAULT_RANGE_DAYS = 7  # 검사일 기본값: 오늘을 포함한 최근 7일
+DEFAULT_RANGE_DAYS = 7  # 등록일 검색 기본값: 오늘을 포함한 최근 7일
 
 # 같은 사용자 화면에서 이 시간(초) 안에는 검사 목록을 다시 불러오지 않습니다.
 # 줄 선택처럼 화면이 다시 그려질 때마다 서버(Firestore)를 조회하지 않기 위해서입니다.
@@ -126,8 +126,8 @@ class ExamRecord:
     patient_age: int | None
     modality: str  # 검사 장비(백엔드 exam_type). CT, MR, CR, US ...
     exam_name: str  # 검사명(백엔드 exam_info)
-    exam_at: datetime | None  # 검사 시각. 없으면 등록 시각으로 기간을 판단합니다.
-    registered_at: datetime  # 등록 시각(백엔드 created_at)
+    exam_at: datetime | None  # 검사 시각. 상세 패널의 검사일시에만 표시합니다.
+    registered_at: datetime  # 등록 시각(백엔드 created_at). 목록의 시간 표시·정렬·기간 검색 기준입니다.
     status: str  # STATUS_OPTIONS 중 하나(화면 상태)
     department: str  # 의뢰과 이름. 없으면 ""
     created_by: str  # 등록자 UID
@@ -397,22 +397,27 @@ def default_filter() -> SearchFilter:
 
 
 def filter_exams(exams: list[ExamRecord], condition: SearchFilter) -> list[ExamRecord]:
-    """검색 조건을 모두 만족하는 검사를 검사 시간 최신순으로 돌려줍니다."""
+    """검색 조건을 모두 만족하는 검사를 등록 시간 최신순으로 돌려줍니다.
+
+    검색어는 환자명, 환자 ID, 케이스 ID 중 하나에 들어 있으면 찾습니다(대소문자 구분 없음).
+    기간은 등록일(한국 시간) 기준입니다.
+    """
     query = condition.query.strip().lower()
     matched = []
     for exam in exams:
-        if query and query not in exam.patient_name.lower() and query not in exam.patient_id.lower():
+        searchable = (exam.patient_name, exam.patient_id, exam.case_id)
+        if query and not any(query in text.lower() for text in searchable):
             continue
-        exam_day = (exam.exam_at or exam.registered_at).astimezone(KST).date()
-        if not condition.start <= exam_day <= condition.end:
+        registered_day = exam.registered_at.astimezone(KST).date()
+        if not condition.start <= registered_day <= condition.end:
             continue
         if condition.modality != ALL and exam.modality != condition.modality:
             continue
         if condition.status != ALL and exam.status != condition.status:
             continue
         matched.append(exam)
-    # 최근 검사가 위로. 검사 시간이 없는 검사는 맨 아래로 보냅니다.
-    return sorted(matched, key=lambda e: (e.exam_at is None, -(e.exam_at.timestamp() if e.exam_at else 0)))
+    # 최근에 등록한 검사가 위로 옵니다.
+    return sorted(matched, key=lambda e: e.registered_at, reverse=True)
 
 
 def is_registrar(user: CurrentUser) -> bool:
@@ -510,6 +515,25 @@ _STYLE = """
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
 
 html, body, .stApp, .stMain { background:#f6f6f6 !important; }
+
+/* 처리 중 화면: 목록 조회나 화면 이동처럼 실행이 0.4초 넘게 걸리면 화면을 살짝 회색으로 덮고
+   가운데에 회전 표시를 띄웁니다. 끝나면 자동으로 사라집니다. 짧은 실행(줄 선택, 시계 갱신)에서는 보이지 않습니다.
+   Streamlit이 실행 중일 때 stApp에 붙이는 data-test-script-state="running" 표시를 이용합니다.
+   보이는 동안에는 덮개가 클릭을 막아 같은 버튼을 여러 번 누르는 것도 막습니다. */
+[data-testid="stApp"][data-test-script-state="running"]::before,
+[data-testid="stApp"][data-test-script-state="running"]::after {
+  content:''; position:fixed; z-index:1000000; visibility:hidden; opacity:0;
+  animation:pacs-loading-show 0.2s ease 0.4s forwards;
+}
+[data-testid="stApp"][data-test-script-state="running"]::before { inset:0; background:rgba(40, 40, 40, 0.18); }
+[data-testid="stApp"][data-test-script-state="running"]::after {
+  left:50%; top:50%; width:calc(44 * 100vh / 960); height:calc(44 * 100vh / 960);
+  margin:calc(-22 * 100vh / 960) 0 0 calc(-22 * 100vh / 960); border-radius:50%;
+  border:calc(4 * 100vh / 960) solid rgba(255, 255, 255, 0.8); border-top-color:#292929;
+  animation:pacs-loading-show 0.2s ease 0.4s forwards, pacs-loading-spin 0.8s linear infinite;
+}
+@keyframes pacs-loading-show { to { visibility:visible; opacity:1; } }
+@keyframes pacs-loading-spin { to { transform:rotate(360deg); } }
 [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"],
 [data-testid="stSidebar"], #MainMenu, footer { display:none !important; }
 .stMainBlockContainer { max-width:none !important; padding:0 !important; margin:0 !important; }
@@ -845,7 +869,8 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#555;
 }
 [class*="st-key-pacs_list_cexam_"] {
-  left:calc(324 * var(--u)); right:calc(278 * var(--u)); top:calc(15 * var(--u));
+  /* 오른쪽 끝은 등록 일시(예: 11.22 10:38)와 겹치지 않는 위치입니다. */
+  left:calc(324 * var(--u)); right:calc(306 * var(--u)); top:calc(15 * var(--u));
   font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#333;
 }
 [class*="st-key-pacs_list_ctime_"] {
@@ -1118,9 +1143,9 @@ def _render_filters() -> None:
                 label_visibility="collapsed",
             )
         with st.container(key="pacs_list_field_dates"):
-            _text("pacs_list_label_dates", "검사일")
+            _text("pacs_list_label_dates", "등록일")
             st.date_input(
-                "검사일",
+                "등록일",
                 value=(defaults.start, defaults.end),
                 key=_filter_key("dates"),
                 format="YYYY.MM.DD",
@@ -1151,7 +1176,7 @@ def _render_count(total: int, condition: SearchFilter) -> None:
 
 def _render_row(index: int, exam: ExamRecord, selected: bool) -> None:
     """검사 한 줄. 선택된 줄은 key가 pacs_list_selrow_N이 되어 배경과 왼쪽 막대가 바뀝니다."""
-    time_text = exam.exam_at.astimezone(KST).strftime("%H:%M") if exam.exam_at else "-"
+    time_text = exam.registered_at.astimezone(KST).strftime("%m.%d %H:%M")  # 등록 일시, 예: 11.22 10:38
     with st.container(key=f"pacs_list_{'selrow' if selected else 'row'}_{index}"):
         _text(f"pacs_list_cname_{index}", exam.patient_name)
         _text(f"pacs_list_cmeta_{index}", _patient_meta(exam))
@@ -1174,7 +1199,7 @@ def _render_table(rows: list[ExamRecord], selected_id: str | None, load_failed: 
         with st.container(key="pacs_list_thead"):
             for name, label in (
                 ("name", "환자명"), ("pid", "환자 ID"), ("mod", "장비"),
-                ("exam", "검사명"), ("time", "검사 시간 ↓"), ("status", "상태"),
+                ("exam", "검사명"), ("time", "등록 시간 ↓"), ("status", "상태"),
             ):
                 _text(f"pacs_list_th_{name}", label)
         # 줄 영역 높이(479)와 스크롤은 CSS로 정합니다. 화면 크기에 맞춰 함께 늘어나게 하기 위해서입니다.
