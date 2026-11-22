@@ -1,11 +1,13 @@
 """PACS 검사 목록 화면.
 
 화면 요소와 입력 처리는 Streamlit 위젯으로 구성하고, 모양은 Figma 디자인(1440×960 기준)을 CSS로 맞춥니다.
-검사 데이터는 지금은 화면 확인용 샘플 1건을 사용합니다. 백엔드가 준비되면 ``load_exams``만 바꾸면 됩니다.
+검사 데이터는 ``load_exams``가 백엔드(services.case.get_case_list 등)에서 불러옵니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
 다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있고, 주소 끝에
 ``?role=REVIEWER``처럼 역할을 붙이면 그 역할로 볼 수 있습니다(REGISTRAR / REVIEWER / ADMIN).
+샘플 사용자는 Firestore에 없는 사용자라 단독 실행에서는 목록 조회가 권한 검사에서 거절되어
+"불러오지 못했습니다" 문구가 표시됩니다.
 
 app.py에서 함께 쓰는 함수:
 - ``current_user_from_profile(profile)``: 로그인으로 확인된 사용자 정보(dict)를 ``render``에 넘길 CurrentUser로 바꿉니다.
@@ -19,7 +21,7 @@ import base64
 import logging
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -36,6 +38,12 @@ STATUS_UNASSIGNED = "미배정"
 STATUS_ASSIGNED = "배정 완료"
 STATUS_DONE = "판독 완료"
 STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_DONE)
+
+# 백엔드(Firestore cases.status)에 지금 저장되는 상태 값입니다(models.py의 CaseStatus).
+# 화면에는 _display_status가 위의 세 화면 상태로 바꿔 보여줍니다.
+BACKEND_STATUS_WAITING = "검토 대기"
+BACKEND_STATUS_REVIEWING = "검토 중"
+BACKEND_STATUS_DONE = "검토 완료"
 
 # 수정할 수 있는 상태입니다. 배정 완료 검사도 수정하게 하려면 STATUS_ASSIGNED를 추가하면 됩니다.
 EDITABLE_STATUSES = frozenset({STATUS_UNASSIGNED})
@@ -59,6 +67,9 @@ DEFAULT_RANGE_DAYS = 7  # 검사일 기본값: 오늘을 포함한 최근 7일
 # 같은 사용자 화면에서 이 시간(초) 안에는 검사 목록을 다시 불러오지 않습니다.
 # 줄 선택처럼 화면이 다시 그려질 때마다 서버(Firestore)를 조회하지 않기 위해서입니다.
 EXAM_CACHE_SECONDS = 30
+
+# 백엔드에서 한 번에 불러오는 검사 수(등록 최신순). 검색은 불러온 검사 안에서 합니다.
+CASE_LIST_LIMIT = 50
 
 # ── 화면 이동 이벤트 (render가 돌려주는 ExamListEvent.kind / target 값) ─────────────
 
@@ -108,18 +119,19 @@ class ExamRecord:
     """검사 목록 한 줄과 상세 패널에 표시할 정보."""
 
     case_id: str
-    accession_no: str
+    accession_no: str  # 접수번호. 백엔드에 없으면 case_id를 씁니다.
     patient_id: str
     patient_name: str
-    patient_sex: str  # "남" / "여"
+    patient_sex: str  # "남" / "여" / "" (알 수 없음)
     patient_age: int | None
-    modality: str  # CT, MR, CR, US ...
-    exam_name: str
+    modality: str  # 검사 장비(백엔드 exam_type). CT, MR, CR, US ...
+    exam_name: str  # 검사명(백엔드 exam_info)
     exam_at: datetime | None  # 검사 시각. 없으면 등록 시각으로 기간을 판단합니다.
-    registered_at: datetime
-    status: str  # STATUS_OPTIONS 중 하나
-    department: str  # 의뢰과
+    registered_at: datetime  # 등록 시각(백엔드 created_at)
+    status: str  # STATUS_OPTIONS 중 하나(화면 상태)
+    department: str  # 의뢰과 이름. 없으면 ""
     created_by: str  # 등록자 UID
+    assignee_uid: str | None = None  # 배정된 검토 담당자 UID. 배정 정보가 없으면 None
 
 
 @dataclass(frozen=True)
@@ -179,47 +191,186 @@ def role_label(user: CurrentUser) -> str:
 _PREVIEW_USER = CurrentUser(uid="preview-registrar", role=ROLE_REGISTRAR, name="김의사", department="영상의학과")
 
 
-def load_exams() -> list[ExamRecord]:
-    """검사 목록을 불러옵니다. 지금은 화면 확인용 샘플 1건을 돌려줍니다.
+def load_exams(user: CurrentUser) -> list[ExamRecord]:
+    """로그인 사용자가 볼 수 있는 검사 목록을 백엔드에서 불러와 화면용 ExamRecord로 바꿉니다.
 
-    백엔드를 연결할 때 서비스의 목록 조회 결과를 ExamRecord로 바꿔 돌려주도록 이 함수만 수정합니다.
+    1. 케이스 목록: services.case.get_case_list(uid, limit). 안에서 조회 권한(require_case_read)을 검사합니다.
+    2. 환자·진료과 정보: repositories.patient.get_patient, repositories.department.get_department.
+       같은 환자·진료과는 한 번만 조회합니다.
+    3. 담당자 배정: repositories.case.get_case_assignment. 아직 구현되지 않았으면 배정 정보 없이 표시합니다.
+
+    목록 조회가 실패하면 오류를 그대로 올려 화면에 불러오기 실패 문구가 나오게 합니다(_get_exams가 처리).
+    케이스 한 건의 값이 잘못되어 바꿀 수 없으면 그 건만 빼고 로그를 남깁니다.
     """
-    today = datetime.now(KST).replace(hour=10, minute=38, second=0, microsecond=0)
-    return [
-        ExamRecord(
-            case_id="sample-0481",
-            accession_no=f"ACC-{today:%Y%m%d}-0481",
-            patient_id="P2600481",
-            patient_name="김민준",
-            patient_sex="남",
-            patient_age=58,
-            modality="CT",
-            exam_name="Chest CT (Contrast)",
-            exam_at=today,
-            registered_at=today,
-            status=STATUS_ASSIGNED,
-            department="응급의학과",
-            created_by=_PREVIEW_USER.uid,
-        )
-    ]
+    # 함수 안에서 불러와, Firebase 설정이 없어도 이 파일을 불러올 수 있게 합니다(login.py와 같은 방식).
+    from src.repositories.department import get_department
+    from src.repositories.patient import get_patient
+    from src.services.case import get_case_list
+
+    cases = get_case_list(user.uid, limit=CASE_LIST_LIMIT)
+    patients = _lookup_each(get_patient, (case.get("patient_id") for case in cases))
+    departments = _lookup_each(get_department, (case.get("department_id") for case in cases))
+    assignees = _load_assignees([_clean(case.get("case_id")) for case in cases])
+
+    exams = []
+    for case in cases:
+        try:
+            exams.append(_exam_from_case(
+                case,
+                patient=patients.get(_clean(case.get("patient_id"))),
+                department=departments.get(_clean(case.get("department_id"))),
+                assignee_uid=assignees.get(_clean(case.get("case_id"))),
+            ))
+        except ValueError:
+            _logger.warning("검사 목록에서 제외한 케이스: %s", case.get("case_id"), exc_info=True)
+    return exams
 
 
-def _get_exams() -> tuple[list[ExamRecord], bool]:
+def _lookup_each(
+    fetch: Callable[[str], Mapping[str, object] | None], ids: Iterable[object]
+) -> dict[str, Mapping[str, object] | None]:
+    """ID마다 fetch(id)를 한 번씩만 불러 {ID: 결과} 사전을 만듭니다. 빈 ID는 건너뜁니다."""
+    found: dict[str, Mapping[str, object] | None] = {}
+    for raw_id in ids:
+        item_id = _clean(raw_id)
+        if item_id and item_id not in found:
+            found[item_id] = fetch(item_id)
+    return found
+
+
+def _load_assignees(case_ids: list[str]) -> dict[str, str | None]:
+    """케이스마다 배정된 검토 담당자 UID를 조회합니다. 조회 함수가 아직 구현되지 않았으면 빈 사전을 돌려줍니다."""
+    from src.repositories.case import get_case_assignment
+
+    assignees: dict[str, str | None] = {}
+    for case_id in case_ids:
+        if not case_id:
+            continue
+        try:
+            assignment = get_case_assignment(case_id)
+        except NotImplementedError:
+            _logger.info("담당자 배정 조회가 아직 구현되지 않아 배정 정보 없이 목록을 표시합니다.")
+            return {}
+        assignees[case_id] = _assignee_uid(assignment)
+    return assignees
+
+
+def _assignee_uid(assignment: Mapping[str, object] | None) -> str | None:
+    """배정 문서에서 담당자 UID를 꺼냅니다. 조회 전용(READ_ONLY) 권한은 배정으로 보지 않습니다.
+
+    필드 이름은 팀에서 확정 전이라 models.py의 user_id와 설계 문서의 user_uid를 모두 읽습니다.
+    """
+    if not assignment:
+        return None
+    if _clean(assignment.get("access_type")).upper() not in ("", "ASSIGNED"):
+        return None
+    return _clean(assignment.get("user_id") or assignment.get("user_uid")) or None
+
+
+_SEX_LABELS = {"M": "남", "MALE": "남", "남": "남", "남성": "남", "F": "여", "FEMALE": "여", "여": "여", "여성": "여"}
+
+
+def _exam_from_case(
+    case: Mapping[str, object],
+    patient: Mapping[str, object] | None,
+    department: Mapping[str, object] | None,
+    assignee_uid: str | None,
+) -> ExamRecord:
+    """백엔드 케이스 문서 1건과 환자·진료과·담당자 정보를 화면 한 줄(ExamRecord)로 바꿉니다.
+
+    케이스 ID, 등록 시각, 상태를 알 수 없으면 ValueError를 냅니다(load_exams가 그 건만 제외).
+    """
+    case_id = _clean(case.get("case_id"))
+    registered_at = _to_datetime(case.get("created_at"))
+    if not case_id or registered_at is None:
+        raise ValueError("케이스 ID 또는 등록 시각(created_at)이 없습니다.")
+    patient = patient or {}
+    department = department or {}
+    return ExamRecord(
+        case_id=case_id,
+        accession_no=_clean(case.get("accession_no")) or case_id,
+        patient_id=_clean(case.get("patient_id")),
+        patient_name=_clean(patient.get("name")) or "-",
+        patient_sex=_SEX_LABELS.get(_clean(patient.get("sex")).upper(), ""),
+        patient_age=_age(patient.get("birth_date")),
+        modality=_clean(case.get("exam_type")),
+        exam_name=_clean(case.get("exam_info")),
+        exam_at=_to_datetime(case.get("exam_at")),
+        registered_at=registered_at,
+        status=_display_status(case.get("status"), assignee_uid),
+        department=_clean(department.get("name")),
+        created_by=_clean(case.get("created_by")),
+        assignee_uid=assignee_uid,
+    )
+
+
+def _display_status(raw: object, assignee_uid: str | None) -> str:
+    """백엔드 상태 값을 화면 상태(미배정 / 배정 완료 / 판독 완료)로 바꿉니다.
+
+    - 검토 대기: 담당자가 배정되었으면 배정 완료, 아니면 미배정
+    - 검토 중: 배정 완료 (화면에는 판독 중 상태를 따로 두지 않음)
+    - 검토 완료: 판독 완료
+    - 팀이 화면 상태 값을 그대로 저장하기로 하면 그 값을 그대로 씁니다.
+    """
+    status = _clean(raw)
+    if status in STATUS_OPTIONS:
+        return status
+    if status == BACKEND_STATUS_WAITING:
+        return STATUS_ASSIGNED if assignee_uid else STATUS_UNASSIGNED
+    if status == BACKEND_STATUS_REVIEWING:
+        return STATUS_ASSIGNED
+    if status == BACKEND_STATUS_DONE:
+        return STATUS_DONE
+    raise ValueError(f"알 수 없는 상태 값입니다: {status!r}")
+
+
+def _to_datetime(value: object) -> datetime | None:
+    """Firestore 시각 값을 시간대가 있는 datetime으로 바꿉니다. 없거나 알 수 없는 형식이면 None입니다.
+
+    시간대가 없는 값은 한국 시간으로 봅니다. ISO 형식 글자("2026-11-20T10:38:00")도 받습니다.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=KST)
+
+
+def _age(birth_date: object) -> int | None:
+    """생년월일("YYYY-MM-DD" 또는 날짜 값)로 오늘(한국 시간) 기준 만 나이를 계산합니다. 알 수 없으면 None입니다."""
+    if isinstance(birth_date, datetime):
+        born = birth_date.date()
+    elif isinstance(birth_date, date):
+        born = birth_date
+    else:
+        try:
+            born = date.fromisoformat(_clean(birth_date))
+        except ValueError:
+            return None
+    today = _today()
+    age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    return age if age >= 0 else None
+
+
+def _get_exams(user: CurrentUser) -> tuple[list[ExamRecord], bool]:
     """세션 캐시를 거쳐 검사 목록을 가져옵니다. (목록, 불러오기 실패 여부)를 돌려줍니다.
 
-    캐시는 사용자 세션마다 따로 저장되므로 다른 사용자의 목록과 섞이지 않습니다.
-    불러오기에 실패하면 캐시에 남기지 않아, 다음 화면 표시 때 다시 시도합니다.
+    캐시는 사용자 세션마다 따로 저장되고, 저장한 사용자의 UID가 다르면 쓰지 않으므로
+    다른 사용자의 목록과 섞이지 않습니다. 불러오기에 실패하면 캐시에 남기지 않아 다음 화면 표시 때 다시 시도합니다.
     """
     cached = st.session_state.get(_EXAMS_CACHE_KEY)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < EXAM_CACHE_SECONDS:
-        return cached[1], False
+    if cached is not None and cached[0] == user.uid and now - cached[1] < EXAM_CACHE_SECONDS:
+        return cached[2], False
     try:
-        exams = load_exams()
+        exams = load_exams(user)
     except Exception:
         _logger.exception("검사 목록 불러오기 실패")
         return [], True
-    st.session_state[_EXAMS_CACHE_KEY] = (now, exams)
+    st.session_state[_EXAMS_CACHE_KEY] = (user.uid, now, exams)
     return exams, False
 
 
@@ -1085,7 +1236,7 @@ def render(user: CurrentUser) -> ExamListEvent | None:
     if notice:
         st.toast(notice)
 
-    exams, load_failed = _get_exams()
+    exams, load_failed = _get_exams(user)
 
     condition = st.session_state.get(_APPLIED_FILTER_KEY) or default_filter()
     rows = filter_exams(exams, condition)
