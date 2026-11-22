@@ -9,6 +9,11 @@ from dataclasses import dataclass
 
 import streamlit as st
 
+from src.auth.firebase_auth import sign_in
+from src.auth.session import save_session
+from src.services.access_policy import get_current_user
+
+
 
 @dataclass(frozen=True)
 class LoginResult:
@@ -311,6 +316,8 @@ def authenticate_with_backend(email: str, password: str) -> LoginResult:
     profile = get_current_user(signed_in["id_token"])
     if signed_in["uid"] != profile["uid"]:
         raise PermissionError("인증 사용자와 사용자 정보가 일치하지 않습니다.")
+
+    save_session(signed_in["id_token"])
 
     return LoginResult(uid=profile["uid"], role=profile["role"])
 
