@@ -9,10 +9,7 @@ from dataclasses import dataclass
 
 import streamlit as st
 
-from src.auth.firebase_auth import sign_in
 from src.auth.session import save_session
-from src.services.access_policy import get_current_user
-
 
 
 @dataclass(frozen=True)
@@ -489,9 +486,9 @@ if __name__ == "__main__":
         st.session_state.pop(_PASSWORD_KEY, None)
         account = st.session_state[_PREVIEW_ACCOUNT_KEY]
         role_names = {
-            "registrar": "등록 담당자",
-            "reviewer": "검토 담당자",
-            "manager": "업무 관리자",
+            "REGISTRAR": "등록 담당자",
+            "REVIEWER": "검토 담당자",
+            "ADMIN": "업무 관리자",
         }
         st.success("로그인과 사용자 권한 확인이 완료되었습니다.")
         st.write(f"확인된 역할: {role_names[account.role]}")
