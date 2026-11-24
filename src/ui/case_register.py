@@ -12,6 +12,8 @@
 DICOM 사용 여부는 팀에서 아직 결정하지 않았습니다. DICOM 정보 읽기는 pydicom 라이브러리가 설치되어 있을 때만
 동작하고, 없으면 파일을 "확인 대기"로 표시합니다(requirements.txt에 pydicom 추가 필요).
 실제 저장(케이스 생성·파일 저장)은 아직 연결하지 않았고, app.py가 EVENT_SUBMIT 이벤트를 받아 처리합니다.
+케이스 생성은 ``services.case.create_case(**event.draft.case_create_args())``로 이어 붙이면 됩니다
+(DICOM 환자번호와 Firestore 환자 연결, 파일 저장·검사일 저장은 팀 결정 후 연결).
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``RegisterEvent``로 화면 이동·등록을 처리합니다.
 current_user는 ``case_list.current_user_from_profile(session.get_current_user())``로 만듭니다.
@@ -33,6 +35,7 @@ from datetime import date, datetime
 
 import streamlit as st
 
+from src.config import MAX_IMAGE_SIZE_MB
 from src.ui.case_list import (
     EVENT_LOGOUT,
     EVENT_NAVIGATE,
@@ -51,10 +54,11 @@ _logger = logging.getLogger(__name__)
 # ── 업무 규칙 ────────────────────────────────────────────────────────────────
 
 DICOM_EXTENSIONS = ("dcm",)  # 불러올 수 있는 파일 확장자
-MAX_DICOM_FILE_MB = 20  # 파일 하나의 최대 크기 (src/config.py의 MAX_IMAGE_SIZE_MB와 같은 값)
+# 파일 하나의 최대 크기. 팀 공통 설정(src/config.py)을 그대로 써서 저장(file_storage)·영상 읽기(image_io)와 기준을 맞춥니다.
+MAX_DICOM_FILE_MB = MAX_IMAGE_SIZE_MB
 MAX_EXAM_NAME_CHARS = 100
 
-# 표의 "상태" 칸에 표시하는 파일 상태입니다. STATUS_OK인 파일만 등록할 수 있습니다.
+# 표의 "상태" 칸에 표시하는 파일 상태입니다. FILE_OK인 파일만 등록할 수 있습니다.
 FILE_OK = "확인 완료"
 FILE_MISMATCH = "환자 불일치"  # 먼저 확인된 영상과 환자번호가 다름
 FILE_FAILED = "읽기 실패"  # DICOM 파일이 아니거나 손상됨
@@ -117,16 +121,31 @@ class DicomFile:
 
 @dataclass(frozen=True)
 class CaseDraft:
-    """검사 등록 버튼을 눌렀을 때 저장할 내용."""
+    """검사 등록 버튼을 눌렀을 때 저장할 내용.
+
+    팀 백엔드 services.case.create_case 인자와의 짝은 case_create_args()에 모아 두었습니다.
+    """
 
     patient_name: str
-    patient_id: str
+    patient_id: str  # DICOM 환자번호(PatientID). create_case는 Firestore patients에 있는 ID만 받습니다.
     patient_sex: str
     patient_age: int
-    exam_name: str
-    modality: str
-    exam_date: date | None
+    exam_name: str  # create_case의 exam_info(검사 부가 정보)
+    modality: str  # create_case의 exam_type(검사 종류)
+    exam_date: date | None  # DICOM 검사일. create_case에 아직 exam_at 인자가 없어 저장되지 않습니다.
     files: tuple[DicomFile, ...]
+    department_id: str = ""  # 등록 담당자의 소속 진료과(users 문서의 department_id). 비어 있으면 create_case가 거절합니다.
+    created_by: str = ""  # 등록 담당자 UID(로그인 사용자)
+
+    def case_create_args(self) -> dict[str, str]:
+        """services.case.create_case(**args)에 그대로 넘길 인자를 만듭니다(케이스 문서만, 파일 저장은 별도)."""
+        return {
+            "patient_id": self.patient_id,
+            "department_id": self.department_id,
+            "exam_type": self.modality,
+            "exam_info": self.exam_name,
+            "created_by": self.created_by,
+        }
 
 
 @dataclass(frozen=True)
@@ -277,8 +296,8 @@ def is_registrar(user: CurrentUser) -> bool:
     return user.role == ROLE_REGISTRAR
 
 
-def build_draft(files: tuple[DicomFile, ...], exam_name: str) -> CaseDraft:
-    """확인된 영상과 검사명으로 등록할 내용을 만듭니다(summarize의 can_submit이 True일 때 호출)."""
+def build_draft(user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str) -> CaseDraft:
+    """확인된 영상·검사명과 로그인 사용자로 등록할 내용을 만듭니다(summarize의 can_submit이 True일 때 호출)."""
     ok_files = tuple(item for item in files if item.status == FILE_OK)
     patient = ok_files[0]
     return CaseDraft(
@@ -290,6 +309,8 @@ def build_draft(files: tuple[DicomFile, ...], exam_name: str) -> CaseDraft:
         modality=patient.modality,
         exam_date=patient.study_date,
         files=ok_files,
+        department_id=user.department_id,
+        created_by=user.uid,
     )
 
 
@@ -858,7 +879,7 @@ def _on_submit(exam_key: str) -> None:
     user = st.session_state.get(_SUBMIT_USER_KEY)
     if user is None or not summarize(user, files, exam_name).can_submit:
         return
-    _emit(EVENT_SUBMIT, draft=build_draft(files, exam_name))
+    _emit(EVENT_SUBMIT, draft=build_draft(user, files, exam_name))
 
 
 # ── 화면 그리기 ──────────────────────────────────────────────────────────────
