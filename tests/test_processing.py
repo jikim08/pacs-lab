@@ -2,6 +2,7 @@
 
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -19,6 +20,19 @@ class ImageProcessingTest(unittest.TestCase):
         decoded = decode_image(encode_png(original))
         np.testing.assert_array_equal(decoded, original)
         self.assertTrue(decoded.flags.writeable)
+
+    def test_result_png_can_be_read_at_the_limit_and_is_rejected_above_it(self):
+        original = np.array([[0, 17, 255], [42, 100, 128]], dtype=np.uint8)
+        encoded_size = len(encode_png(original))
+
+        with patch("src.processing.image_io.MAX_IMAGE_SIZE_BYTES", encoded_size):
+            result = encode_png(original)
+            self.assertEqual(len(result), encoded_size)
+            np.testing.assert_array_equal(decode_image(result), original)
+
+        with patch("src.processing.image_io.MAX_IMAGE_SIZE_BYTES", encoded_size - 1):
+            with self.assertRaisesRegex(ValidationError, "저장 가능한 크기"):
+                encode_png(original)
 
     def test_jpeg_is_grayscale_and_gif_is_rejected(self):
         source = Image.new("RGB", (32, 24), (70, 70, 70))
