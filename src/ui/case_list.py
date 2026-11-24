@@ -96,7 +96,7 @@ MSG_NO_RESULT = "조건에 맞는 검사가 없습니다. 검색 조건을 변�
 MSG_NO_SELECTION = "목록에서 검사를 선택하면 상세 정보가 표시됩니다."
 MSG_LOAD_FAILED = "검사 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
 MSG_EDIT_NOT_ALLOWED = "본인이 등록한 미배정 검사만 수정할 수 있습니다."
-MSG_INVALID_DATES = "검사일 시작일이 종료일보다 늦을 수 없습니다."
+MSG_INVALID_DATES = "등록일 시작일이 종료일보다 늦을 수 없습니다."
 USER_NAME_FALLBACK = "사용자"  # 사용자 정보에 이름이 없을 때 상단 바에 표시
 
 # ── 세션 상태 키 ─────────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ class ExamRecord:
     """검사 목록 한 줄과 상세 패널에 표시할 정보."""
 
     case_id: str
-    accession_no: str  # 접수번호. 백엔드에 없으면 case_id를 씁니다.
+    accession_no: str  # 접수번호. 팀 데이터에 없어 case_id를 씁니다(화면 상세에는 "케이스 ID"로 case_id를 표시).
     patient_id: str
     patient_name: str
     patient_sex: str  # "남" / "여" / "" (알 수 없음)
@@ -146,7 +146,7 @@ class ExamRecord:
     exam_at: datetime | None  # 검사 시각. 상세 패널의 검사일시에만 표시합니다.
     registered_at: datetime  # 등록 시각(백엔드 created_at). 목록의 시간 표시·정렬·기간 검색 기준입니다.
     status: str  # STATUS_OPTIONS 중 하나(화면 상태)
-    department: str  # 의뢰과 이름. 없으면 ""
+    department: str  # 진료과 이름(departments 문서의 name). 없으면 ""
     created_by: str  # 등록자 UID
     assignee_uid: str | None = None  # 배정된 검토 담당자 UID. 배정 정보가 없으면 None
 
@@ -1441,7 +1441,7 @@ def _render_filters() -> None:
             st.text_input(
                 "환자 검색",
                 key=_filter_key("query"),
-                placeholder="환자명 또는 환자 ID 검색",
+                placeholder="환자명, 환자 ID, 케이스 ID 검색",
                 max_chars=64,
                 label_visibility="collapsed",
             )
@@ -1529,8 +1529,8 @@ def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
         fields = [
             ("검사명", exam.exam_name),
             ("검사일시", exam_time),
-            ("접수번호", exam.accession_no),
-            ("의뢰과", exam.department),
+            ("케이스 ID", exam.case_id),
+            ("진료과", exam.department),
         ]
         _text("pacs_list_dname", exam.patient_name)
         _text(f"pacs_list_dbadge_{_badge_kind(exam.status)}", exam.status, align="center")
