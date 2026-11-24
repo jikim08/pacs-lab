@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import streamlit as st
 
+from src.auth.session import save_session, logout
+
 
 @dataclass(frozen=True)
 class LoginResult:
@@ -312,6 +314,8 @@ def authenticate_with_backend(email: str, password: str) -> LoginResult:
     if signed_in["uid"] != profile["uid"]:
         raise PermissionError("인증 사용자와 사용자 정보가 일치하지 않습니다.")
 
+    save_session(signed_in["id_token"])
+
     return LoginResult(uid=profile["uid"], role=profile["role"])
 
 
@@ -482,16 +486,14 @@ if __name__ == "__main__":
         st.session_state.pop(_PASSWORD_KEY, None)
         account = st.session_state[_PREVIEW_ACCOUNT_KEY]
         role_names = {
-            "registrar": "등록 담당자",
-            "reviewer": "검토 담당자",
-            "manager": "업무 관리자",
+            "REGISTRAR": "등록 담당자",
+            "REVIEWER": "검토 담당자",
+            "ADMIN": "업무 관리자",
         }
         st.success("로그인과 사용자 권한 확인이 완료되었습니다.")
         st.write(f"확인된 역할: {role_names[account.role]}")
         if st.button("다시 로그인"):
-            del st.session_state[_PREVIEW_ACCOUNT_KEY]
-            if not st.session_state.get(_REMEMBER_EMAIL_KEY, False):
-                st.session_state.pop(_EMAIL_KEY, None)
+            logout()
             st.rerun()
     else:
         account = render(authenticate=authenticate_with_backend)
