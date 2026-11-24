@@ -314,7 +314,7 @@ def authenticate_with_backend(email: str, password: str) -> LoginResult:
     if signed_in["uid"] != profile["uid"]:
         raise PermissionError("인증 사용자와 사용자 정보가 일치하지 않습니다.")
 
-    save_session(signed_in["id_token"])
+    save_session(signed_in["id_token"], refresh_token=signed_in["refresh_token"], expires_in=signed_in["expires_in"])
 
     return LoginResult(uid=profile["uid"], role=profile["role"])
 

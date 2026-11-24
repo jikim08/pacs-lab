@@ -2,13 +2,15 @@
 """Streamlit 로그인 세션 관리."""
 
 import streamlit as st
+import time
 
 from src.models import User
 from src.exception import AuthenticationError, PermissionDeniedError
-from .firebase_auth import verify_token
+from .firebase_auth import verify_token, refresh_id_token
 from src.repositories.user import get_user
 
 _AUTH_KEY = '_pacs_auth'
+_REFRESH_MARGIN = 60
 
 def _load_user(id_token: str) -> User:
     try:
@@ -26,12 +28,21 @@ def _load_user(id_token: str) -> User:
         "uid" : identity["uid"],
     }
 
-def save_session(id_token: str) -> None:
-    _load_user(id_token)
+def save_session(id_token: str, refresh_token: str, expires_in: int) -> None:
+    """인증을 확인한 뒤 토큰과 만료 시각을 저장한다."""
+    if not refresh_token or expires_in <= 0:
+        raise AuthenticationError("로그인 응답을 확인할 수 없습니다.")
+
+    issued_at = time.time()
+    user = _load_user(id_token)
 
     st.session_state[_AUTH_KEY] = {
-        "id_token" : id_token
+        "uid": user["uid"],
+        "id_token": id_token,
+        "refresh_token": refresh_token,
+        "expires_at": issued_at + expires_in,
     }
+
 
 
 def get_current_user() -> User | None:
@@ -45,8 +56,45 @@ def get_current_user() -> User | None:
     if session is None:
         return None
 
+    required_keys = {
+        "uid",
+        "id_token",
+        "refresh_token",
+        "expires_at",
+    }
+    if not required_keys.issubset(session):
+        logout()
+        return None
+    
     try:
+        if time.time() >= session["expires_at"] - _REFRESH_MARGIN:
+            requested_at = time.time()
+            refreshed = refresh_id_token(session["refresh_token"])
+
+            # 토큰 갱신 과정에서 사용자가 바뀌면 거절한다.
+            if refreshed["uid"] != session["uid"]:
+                raise AuthenticationError(
+                    "로그인 사용자 정보가 일치하지 않습니다."
+                )
+
+            user = _load_user(refreshed["id_token"])
+
+            if user["uid"] != session["uid"]:
+                raise AuthenticationError(
+                    "로그인 사용자 정보가 일치하지 않습니다."
+                )
+
+            st.session_state[_AUTH_KEY] = {
+                "uid": user["uid"],
+                "id_token": refreshed["id_token"],
+                "refresh_token": refreshed["refresh_token"],
+                "expires_at": requested_at + refreshed["expires_in"],
+            }
+
+            return user
+
         return _load_user(session["id_token"])
+
     except (AuthenticationError, PermissionDeniedError):
         logout()
         raise
