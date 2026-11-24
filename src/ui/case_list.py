@@ -39,10 +39,12 @@ KST = timezone(timedelta(hours=9), "KST")
 
 # ── 업무 규칙 ────────────────────────────────────────────────────────────────
 
-STATUS_UNASSIGNED = "미배정"
-STATUS_ASSIGNED = "배정 완료"
-STATUS_DONE = "판독 완료"
-STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_DONE)
+# 화면에 보여주는 검사 상태 4가지입니다(검토 흐름 순서).
+STATUS_UNASSIGNED = "미배정"  # 등록됐지만 업무 담당자가 아직 검토 담당자를 배정하지 않음
+STATUS_ASSIGNED = "배정 완료"  # 검토 담당자가 배정됐지만 아직 검토를 시작하지 않음
+STATUS_REVIEWING = "검토 중"  # 검토 담당자가 "검토 시작"을 누름. 저장만 하고 나가도 검토 완료 전까지 유지
+STATUS_DONE = "검토 완료"  # 검토 담당자가 "검토 완료"를 누름
+STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_REVIEWING, STATUS_DONE)
 
 # 백엔드(Firestore cases.status)에 지금 저장되는 상태 값입니다(models.py의 CaseStatus).
 # 화면에는 _display_status가 위의 세 화면 상태로 바꿔 보여줍니다.
@@ -50,7 +52,8 @@ BACKEND_STATUS_WAITING = "검토 대기"
 BACKEND_STATUS_REVIEWING = "검토 중"
 BACKEND_STATUS_DONE = "검토 완료"
 
-# 수정할 수 있는 상태입니다. 배정 완료 검사도 수정하게 하려면 STATUS_ASSIGNED를 추가하면 됩니다.
+# 수정할 수 있는 상태입니다. 미배정 검사만 수정할 수 있고, 검토 담당자가 배정된 뒤
+# (배정 완료·검토 중·검토 완료)에는 수정할 수 없습니다.
 EDITABLE_STATUSES = frozenset({STATUS_UNASSIGNED})
 
 # 사용자 역할입니다. Firestore users 문서의 role 값, models.py의 UserRole과 글자까지 같아야 합니다.
@@ -310,11 +313,11 @@ def _exam_from_case(
 
 
 def _display_status(raw: object, assignee_uid: str | None) -> str:
-    """백엔드 상태 값을 화면 상태(미배정 / 배정 완료 / 판독 완료)로 바꿉니다.
+    """백엔드 상태 값을 화면 상태(미배정 / 배정 완료 / 검토 중 / 검토 완료)로 바꿉니다.
 
-    - 검토 대기: 담당자가 배정되었으면 배정 완료, 아니면 미배정
-    - 검토 중: 배정 완료 (화면에는 판독 중 상태를 따로 두지 않음)
-    - 검토 완료: 판독 완료
+    - 검토 대기: 담당자가 배정되었으면 배정 완료, 아니면 미배정 (배정은 case_assignees 문서로 판단)
+    - 검토 중: 검토 중 (검토 담당자가 "검토 시작"을 누른 뒤, 검토 완료 전까지)
+    - 검토 완료: 검토 완료
     - 팀이 화면 상태 값을 그대로 저장하기로 하면 그 값을 그대로 씁니다.
     """
     status = _clean(raw)
@@ -323,7 +326,7 @@ def _display_status(raw: object, assignee_uid: str | None) -> str:
     if status == BACKEND_STATUS_WAITING:
         return STATUS_ASSIGNED if assignee_uid else STATUS_UNASSIGNED
     if status == BACKEND_STATUS_REVIEWING:
-        return STATUS_ASSIGNED
+        return STATUS_REVIEWING
     if status == BACKEND_STATUS_DONE:
         return STATUS_DONE
     raise ValueError(f"알 수 없는 상태 값입니다: {status!r}")
@@ -717,7 +720,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_title_text { font-size:calc(26 * var(--u)); line-height:calc(39 * var(--u)); font-weight:700; color:#1d1d1d; }
 .st-key-pacs_list_subtitle { margin:calc(5 * var(--u)) 0 0 1px; font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); color:#727272; }
 
-/* 통계 카드 4개: 280×88, 간격 17~18 */
+/* 통계 카드 5개(전체 + 상태 4개): 높이 88, 간격 17~18. 너비는 화면 폭을 5등분합니다. */
 .st-key-pacs_list_stage .st-key-pacs_list_stats {
   left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(110 * var(--u)); width:auto !important;
   flex-wrap:nowrap !important; gap:calc(17.33 * var(--u)) !important;
@@ -732,6 +735,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   content:''; position:absolute; left:-1px; top:calc(16 * var(--u)); width:3px; height:calc(54 * var(--u));
   border-radius:1px; background:#333;
 }
+.st-key-pacs_list_stat_card_accent_reviewing::before { background:#3266c3; }  /* 검토 중 카드는 파란 막대 */
 [class*="st-key-pacs_list_stat_label_"] {
   left:calc(17 * var(--u)); top:calc(12 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#626262;
 }
@@ -909,13 +913,17 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
 }
 
-/* 상태 배지: 80×26. key에 상태 종류(done / assigned / unassigned)가 들어갑니다. */
+/* 상태 배지: 80×26. key에 상태 종류(done / reviewing / assigned / unassigned)가 들어갑니다. */
 [class*="st-key-pacs_list_cbadge_"], [class*="st-key-pacs_list_dbadge_"] {
   width:calc(80 * var(--u)) !important; height:calc(26 * var(--u)); display:flex !important;
   align-items:center; justify-content:center; border-radius:calc(6 * var(--u)); text-align:center;
   font-size:calc(11 * var(--u)); line-height:calc(15 * var(--u));
 }
 [class*="st-key-pacs_list_cbadge_done_"], .st-key-pacs_list_dbadge_done { background:#252525; color:#fff; }
+/* 검토 중: 진행 중인 검사가 눈에 띄도록 파란 박스(검사 등록 화면의 파란색과 같은 색) */
+[class*="st-key-pacs_list_cbadge_reviewing_"], .st-key-pacs_list_dbadge_reviewing {
+  background:#edf3fc; color:#3266c3; border:1px solid #c5d6f2; font-weight:700;
+}
 [class*="st-key-pacs_list_cbadge_assigned_"], .st-key-pacs_list_dbadge_assigned { background:#f4f4f4; color:#222; font-weight:700; }
 [class*="st-key-pacs_list_cbadge_unassigned_"], .st-key-pacs_list_dbadge_unassigned { background:#fff; color:#666; border:1px solid #d8d8d8; }
 
@@ -1063,7 +1071,7 @@ def _text(key: str, body: object, align: str = "left") -> None:
 
 
 def _badge_kind(status: str) -> str:
-    return {STATUS_DONE: "done", STATUS_ASSIGNED: "assigned"}.get(status, "unassigned")
+    return {STATUS_DONE: "done", STATUS_REVIEWING: "reviewing", STATUS_ASSIGNED: "assigned"}.get(status, "unassigned")
 
 
 def _patient_meta(exam: ExamRecord) -> str:
@@ -1117,7 +1125,7 @@ def _render_title() -> None:
     with st.container(key="pacs_list_title"):
         with st.container(key="pacs_list_title_text"):
             st.title("검사 목록", anchor=False)
-        _text("pacs_list_subtitle", "환자의 검사 영상을 확인하고 판독 업무를 시작하세요.")
+        _text("pacs_list_subtitle", "환자의 검사 영상을 확인하고 검토 업무를 시작하세요.")
 
 
 def _render_stats(exams: list[ExamRecord]) -> None:
@@ -1126,7 +1134,8 @@ def _render_stats(exams: list[ExamRecord]) -> None:
     cards = [
         ("total", "전체 검사", len(exams), "접수된 검사", False),
         ("unassigned", STATUS_UNASSIGNED, counts[STATUS_UNASSIGNED], "배정 대기 중", True),
-        ("assigned", STATUS_ASSIGNED, counts[STATUS_ASSIGNED], "판독 대기 중", True),
+        ("assigned", STATUS_ASSIGNED, counts[STATUS_ASSIGNED], "검토 대기 중", True),
+        ("reviewing", STATUS_REVIEWING, counts[STATUS_REVIEWING], "진행 중", True),
         ("done", STATUS_DONE, counts[STATUS_DONE], "", False),
     ]
     with st.container(key="pacs_list_stats", horizontal=True):
@@ -1163,8 +1172,8 @@ def _render_filters() -> None:
             _text("pacs_list_label_modality", "검사 장비")
             st.selectbox("검사 장비", (ALL, *MODALITY_OPTIONS), key=_filter_key("modality"), label_visibility="collapsed")
         with st.container(key="pacs_list_field_status"):
-            _text("pacs_list_label_status", "판독 상태")
-            st.selectbox("판독 상태", (ALL, *STATUS_OPTIONS), key=_filter_key("status"), label_visibility="collapsed")
+            _text("pacs_list_label_status", "검토 상태")
+            st.selectbox("검토 상태", (ALL, *STATUS_OPTIONS), key=_filter_key("status"), label_visibility="collapsed")
         with st.container(key="pacs_list_field_search"):
             st.button("검색", key="pacs_list_search_button", width="stretch", on_click=_on_search)
 
