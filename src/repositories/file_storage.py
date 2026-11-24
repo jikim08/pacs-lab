@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.config import FILE_STORAGE_ROOT
 from src.exception import ValidationError
+from src.exception import NotFoundError, StorageError, ValidationError
 
 # 영문, 숫자, 밑줄(_), 하이픈(-)만 허용하는 ID 규칙
 _ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
@@ -56,14 +57,16 @@ def save_file(
 
 def read_file(storage_path: str) -> bytes:
     """상대 경로에 해당하는 파일을 바이트로 읽는다.
-
-    저장 루트 밖 접근을 차단한다.
-
-    잘못된 경로: ValidationError
-    파일 없음: NotFoundError
-    읽기 실패: StorageError
+    ... (docstring 그대로)
     """
-    raise NotImplementedError
+    path = _resolve_path(storage_path)
+
+    try:
+        return path.read_bytes()
+    except FileNotFoundError as error:
+        raise NotFoundError("저장된 파일을 찾을 수 없습니다.") from error
+    except OSError as error:
+        raise StorageError("파일을 읽는 중 오류가 발생했습니다.") from error
 
 
 def delete_file(storage_path: str) -> None:
