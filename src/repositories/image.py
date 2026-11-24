@@ -1,16 +1,16 @@
 """Firestore 영상 파일 메타데이터 관리."""
 import re
-from typing import cast
+from typing import cast, get_args
 
 # firestroe가 던지는 Google 쪽 예외들 처리
 from google.api_core.exceptions import Conflict, GoogleAPICallError, RetryError
 from google.cloud import firestore
-from google.cloud.firestore_v1 import DocumentSnapshot 
+from google.cloud.firestore_v1 import DocumentSnapshot, FieldFilter
 
 
 from src.exception import ConflictError, StorageError, ValidationError
 from src.firebase_client import get_db
-from src.models import FileInfo
+from src.models import FileInfo, FileKind
 
 # 컬렉션 이름을 한 곳에 둠.
 _FILES_COLLECTION = "files"
@@ -57,8 +57,28 @@ def list_case_files(
     kind는 None, ORIGINAL, RESULT 중 하나이다.
     None이면 원본과 결과를 모두 조회한다.
     결과가 없으면 빈 리스트를 반환한다.
+    등록 시각(created_at) 오래된 순으로 정렬한다.
     """
-    raise NotImplementedError
+    _validate_id(case_id, "case_id")
+
+    # kind 검증. 파일의 종류가 옳게 들어갔는지 확인.
+    if kind is not None and kind not in get_args(FileKind):
+        raise ValidationError("파일 종류는 ORIGINAL 또는 RESULT여야 합니다.")
+
+    # Firestore 실제 검색. filter를 통해서 필터값에 해당하는 목록만 가져옴.
+    try:
+        query = get_db().collection(_FILES_COLLECTION).where(
+            filter=FieldFilter("case_id", "==", case_id)
+        )
+        if kind is not None:
+            query = query.where(filter=FieldFilter("kind", "==", kind))
+
+        # 실제 DB에 요청.
+        files = [_to_file_info(document) for document in query.stream()]
+    except (GoogleAPICallError, RetryError) as error:
+        raise StorageError("파일 목록을 조회하지 못했습니다.") from error
+
+    return sorted(files, key=lambda file: (file["created_at"], file["file_id"]))
 
 def save_file_info(file_info: FileInfo) -> None:
     """지정된 file_id로 파일 정보를 신규 저장한다.
