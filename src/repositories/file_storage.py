@@ -2,9 +2,8 @@
 import re
 from pathlib import Path
 
-from src.config import FILE_STORAGE_ROOT
-from src.exception import ValidationError
-from src.exception import NotFoundError, StorageError
+from src.config import FILE_STORAGE_ROOT,ALLOWED_IMAGE_EXTENSIONS
+from src.exception import NotFoundError, StorageError, ConflictError, ValidationError
 
 # 영문, 숫자, 밑줄(_), 하이픈(-)만 허용하는 ID 규칙
 _ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
@@ -52,7 +51,33 @@ def save_file(
     파일 중복: ConflictError
     저장 실패: StorageError
     """
-    raise NotImplementedError
+    _validate_id(case_id, "case_id")
+    _validate_id(file_id, "file_id")
+
+    if not isinstance(extension, str) or extension.lower() not in ALLOWED_IMAGE_EXTENSIONS:
+        raise ValidationError("지원하지 않는 파일 확장자입니다.")
+
+    if not isinstance(file_bytes, bytes) or not file_bytes:
+        raise ValidationError("저장할 파일 내용이 비어 있습니다.")
+
+    storage_path = f"cases/{case_id}/files/{file_id}.{extension.lower()}"
+    path = _resolve_path(storage_path)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as file:
+            file.write(file_bytes)
+    except FileExistsError as error:
+        raise ConflictError("같은 ID의 파일이 이미 존재합니다.") from error
+    except OSError as error:
+        # 쓰다가 실패해 남은 불완전한 파일 정리
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise StorageError("파일을 저장하는 중 오류가 발생했습니다.") from error
+
+    return storage_path
 
 
 def read_file(storage_path: str) -> bytes:
@@ -85,7 +110,7 @@ def delete_file(storage_path: str) -> None:
     삭제 실패: StorageError
     """
     path = _resolve_path(storage_path)
-    
+
     try:
         path.unlink(missing_ok=True)
     except OSError as error:
