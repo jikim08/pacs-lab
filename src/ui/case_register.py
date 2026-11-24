@@ -8,6 +8,7 @@
 2. 파일마다 DICOM 정보를 읽어 표에 표시하고, 첫 번째로 확인된 영상의 환자 정보·검사 장비를 위 칸에 채웁니다.
    다른 환자의 영상은 "환자 불일치"로 표시하며, 표의 × 버튼으로 뺄 수 있습니다.
 3. 검사명을 직접 입력하면 "검사 등록" 버튼이 켜지고, 누르면 등록할 내용(CaseDraft)을 이벤트로 돌려줍니다.
+수정 모드(start_edit 후): 기존 검사 값이 채워진 같은 화면에서 검사명·영상을 고치고 "수정 저장"을 누릅니다.
 
 DICOM 사용 여부는 팀에서 아직 결정하지 않았습니다. DICOM 정보 읽기는 pydicom 라이브러리가 설치되어 있을 때만
 동작하고, 없으면 파일을 "확인 대기"로 표시합니다(requirements.txt에 pydicom 추가 필요).
@@ -61,9 +62,9 @@ DICOM_EXTENSIONS = ("dcm",)  # 불러올 수 있는 파일 확장자
 MAX_DICOM_FILE_MB = MAX_IMAGE_SIZE_MB
 MAX_EXAM_NAME_CHARS = 100
 
-# 표의 "상태" 칸에 표시하는 파일 상태입니다. FILE_OK인 파일만 등록할 수 있습니다.
+# 표의 "상태" 칸에 표시하는 파일 상태입니다. 저장 대상은 FILE_OK(새 영상)와, 수정 화면의 FILE_SAVED(기존 영상)뿐입니다.
 FILE_OK = "확인 완료"
-FILE_MISMATCH = "환자 불일치"  # 먼저 확인된 영상과 환자번호가 다름
+FILE_MISMATCH = "환자 불일치"  # 기준 환자(첫 확인 영상, 수정 화면이면 기존 검사의 환자)와 환자번호가 다름
 FILE_FAILED = "읽기 실패"  # DICOM 파일이 아니거나 손상됨
 FILE_TOO_LARGE = "크기 초과"
 FILE_PENDING = "확인 대기"  # DICOM을 읽을 라이브러리(pydicom)가 아직 없음
@@ -102,7 +103,7 @@ _FILES_KEY = "_pacs_reg_files"  # 불러온 파일 목록 (DicomFile 튜플)
 _FORM_VERSION_KEY = "_pacs_reg_form_version"  # 입력칸을 비울 때 올리는 번호
 _UPLOAD_VERSION_KEY = "_pacs_reg_upload_version"  # 파일 선택 버튼을 비울 때 올리는 번호
 _NEXT_FILE_ID_KEY = "_pacs_reg_next_file_id"  # 불러온 파일마다 붙이는 번호(삭제 버튼 key에 사용)
-_SUBMIT_USER_KEY = "_pacs_reg_submit_user"  # 화면을 그린 사용자(검사 등록 버튼 콜백에서 권한을 다시 확인)
+_SUBMIT_USER_KEY = "_pacs_reg_submit_user"  # 화면을 그린 사용자(검사 등록·수정 저장 버튼 콜백에서 권한을 다시 확인)
 _EVENT_KEY = "_pacs_reg_event"
 _NOTICE_KEY = "_pacs_reg_notice"
 _EDIT_KEY = "_pacs_reg_edit"  # 수정 화면이면 수정할 검사(EditTarget), 새 검사 등록이면 없음
@@ -147,7 +148,7 @@ class EditTarget:
 
 @dataclass(frozen=True)
 class CaseDraft:
-    """검사 등록 버튼을 눌렀을 때 저장할 내용.
+    """검사 등록·수정 저장 버튼을 눌렀을 때 저장할 내용(수정이면 case_id가 들어 있음).
 
     팀 백엔드 services.case.create_case 인자와의 짝은 case_create_args()에 모아 두었습니다.
     """
@@ -187,14 +188,14 @@ class RegisterEvent:
 
     kind: str  # EVENT_NAVIGATE | EVENT_LOGOUT | EVENT_SUBMIT | EVENT_UPDATE
     target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_LIST | TARGET_REVIEW_ASSIGN
-    draft: CaseDraft | None = None  # EVENT_SUBMIT일 때
+    draft: CaseDraft | None = None  # EVENT_SUBMIT·EVENT_UPDATE일 때
 
 
 @dataclass(frozen=True)
 class FormSummary:
     """불러온 파일과 입력값으로 정한 화면 상태(채울 칸, 버튼 상태, 배지)."""
 
-    patient: DicomFile | None  # 환자 정보를 가져온 영상(첫 번째로 확인된 영상)
+    patient: DicomFile | None  # 위 칸에 채울 환자 정보(새 등록: 첫 확인 영상, 수정: 기존 검사 값)
     ok_count: int
     problem_count: int
     can_submit: bool
@@ -787,7 +788,8 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 .st-key-pacs_reg_title { left:calc(32 * var(--u)); top:calc(24 * var(--u)); width:auto !important; white-space:nowrap; }
 .st-key-pacs_reg_title_text { font-size:calc(26 * var(--u)); line-height:calc(39 * var(--u)); font-weight:700; color:#1d1d1d; }
 .st-key-pacs_reg_subtitle { margin-top:calc(5 * var(--u)); font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); color:#626c79; }
-/* 상태 배지: 높이 30, 최소 너비 158, 오른쪽 끝에서 32. key에 상태 종류(new / draft / check / ready)가 들어갑니다. */
+/* 상태 배지: 높이 30, 최소 너비 158, 오른쪽 끝에서 32. key에 상태 종류(new / draft / check / ready)가 들어갑니다.
+   수정 화면 배지는 같은 모양을 씁니다(수정 중 = draft, 수정 준비 완료 = ready). */
 [class*="st-key-pacs_reg_badge_"] {
   right:calc(32 * var(--u)); top:calc(36 * var(--u)); min-width:calc(158 * var(--u)); height:calc(30 * var(--u));
   display:flex !important; align-items:center; justify-content:center; padding:0 calc(20 * var(--u));
@@ -944,7 +946,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 [class*="st-key-pacs_reg_cmod_"], [class*="st-key-pacs_reg_cdate_"], [class*="st-key-pacs_reg_ccount_"] {
   top:calc(17 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#333; font-variant-numeric:tabular-nums;
 }
-/* 파일 상태 배지: key에 상태 종류(ok / bad / wait)가 들어갑니다. */
+/* 파일 상태 배지: key에 상태 종류(ok / bad / wait / saved)가 들어갑니다. saved는 수정 화면의 기존 영상(등록됨). */
 [class*="st-key-pacs_reg_cstatus_"] {
   top:calc(14 * var(--u)); height:calc(24 * var(--u)); display:flex !important; flex-direction:column; justify-content:center;
   padding:0 calc(10 * var(--u)); border-radius:calc(12 * var(--u));
@@ -953,7 +955,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 [class*="st-key-pacs_reg_cstatus_ok_"] { background:#edf3fc; color:#3266c3; }
 [class*="st-key-pacs_reg_cstatus_bad_"] { background:#fdeeee; color:#c43c3c; }
 [class*="st-key-pacs_reg_cstatus_wait_"] { background:#f4f6f9; color:#626c79; }
-[class*="st-key-pacs_reg_cstatus_saved_"] { background:#f2f2f2; color:#444; }  /* 수정 화면: 이미 저장된 영상 */
+[class*="st-key-pacs_reg_cstatus_saved_"] { background:#f2f2f2; color:#444; }
 /* 줄 오른쪽 끝 삭제(×) 버튼: 28×28 */
 [class*="st-key-pacs_reg_remove_"] {
   position:absolute !important; right:calc(16 * var(--u)); top:calc(12 * var(--u));
@@ -988,7 +990,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
   font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#626c79;
 }
 
-/* ── 하단: 구분선(y 802) + 취소(88×42) · 검사 등록(120×42) 버튼 ── */
+/* ── 하단: 구분선(y 802) + 취소(88×42) · 검사 등록(수정 화면은 "수정 저장", 120×42) 버튼 ── */
 .st-key-pacs_reg_main::after {
   content:''; position:absolute; left:calc(32 * var(--u)); right:calc(32 * var(--u)); top:calc(802 * var(--u));
   height:1px; background:#dee3e9;
@@ -1284,7 +1286,7 @@ def _render_footer(user: CurrentUser, summary: FormSummary, exam_key: str, editi
 
 
 def render(user: CurrentUser) -> RegisterEvent | None:
-    """검사 등록 화면을 그립니다. 화면 이동·등록 버튼이 눌리면 RegisterEvent를 돌려줍니다."""
+    """검사 등록(또는 수정) 화면을 그립니다. 화면 이동·등록·수정 저장 버튼이 눌리면 RegisterEvent를 돌려줍니다."""
     st.html(_STYLE)
 
     notice = st.session_state.pop(_NOTICE_KEY, None)

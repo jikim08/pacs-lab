@@ -4,10 +4,12 @@
 검사 데이터는 ``load_exams``가 백엔드(services.case.get_case_list 등)에서 불러옵니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
-다른 메뉴, 로그아웃)을 처리합니다. 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있고, 주소 끝에
-``?role=REVIEWER``처럼 역할을 붙이면 그 역할로 볼 수 있습니다(REGISTRAR / REVIEWER / ADMIN).
-샘플 사용자는 Firestore에 없는 사용자라 단독 실행에서는 목록 조회가 권한 검사에서 거절되어
-"불러오지 못했습니다" 문구가 표시됩니다.
+다른 메뉴, 로그아웃)을 처리합니다. 로그아웃·수정 버튼은 화면 가운데 확인창을 거친 뒤에 이벤트를 보냅니다.
+- EVENT_EDIT(case_id): 검사 등록 화면의 수정 모드로 이동합니다(case_register.start_edit 참고).
+
+단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있고, 주소 끝에 ``?role=REVIEWER``처럼 역할을 붙이면
+그 역할로 볼 수 있습니다(REGISTRAR / REVIEWER / ADMIN). 샘플 사용자는 Firestore에 없어서
+단독 실행에서는 목록 조회가 거절되어 "불러오지 못했습니다" 문구가 표시됩니다.
 
 app.py에서 함께 쓰는 함수:
 - ``current_user_from_profile(profile)``: ``session.get_current_user()``가 돌려준 사용자 정보(dict)를 ``render``에 넘길
@@ -47,8 +49,9 @@ STATUS_REVIEWING = "검토 중"  # 검토 담당자가 "검토 시작"을 누름
 STATUS_DONE = "검토 완료"  # 검토 담당자가 "검토 완료"를 누름
 STATUS_OPTIONS = (STATUS_UNASSIGNED, STATUS_ASSIGNED, STATUS_REVIEWING, STATUS_DONE)
 
-# 백엔드(Firestore cases.status)에 지금 저장되는 상태 값입니다(models.py의 CaseStatus).
-# 화면에는 _display_status가 위의 세 화면 상태로 바꿔 보여줍니다.
+# 백엔드(Firestore cases.status)에 저장되는 상태 값입니다(models.py의 CaseStatus, 팀 확정).
+# _display_status가 위의 화면 상태 4가지로 바꿉니다. "검토 대기"는 담당자 배정 여부로 미배정 / 배정 완료로 나뉩니다.
+# "검토 중"·"검토 완료"는 화면 이름과 글자가 같지만, 화면 이름이 바뀌어도 이 값은 백엔드와 맞춰야 합니다.
 BACKEND_STATUS_WAITING = "검토 대기"
 BACKEND_STATUS_REVIEWING = "검토 중"
 BACKEND_STATUS_DONE = "검토 완료"
@@ -83,9 +86,9 @@ CASE_LIST_LIMIT = 50
 # ── 화면 이동 이벤트 (render가 돌려주는 ExamListEvent.kind / target 값) ─────────────
 
 EVENT_OPEN_VIEWER = "open_viewer"  # 영상 뷰어 버튼 (case_id 포함)
-EVENT_EDIT = "edit"  # 수정 버튼 (case_id 포함)
+EVENT_EDIT = "edit"  # 수정 확인창의 수정 버튼 (case_id 포함)
 EVENT_NAVIGATE = "navigate"  # 왼쪽 메뉴 (target 포함)
-EVENT_LOGOUT = "logout"  # 로그아웃 버튼
+EVENT_LOGOUT = "logout"  # 로그아웃 확인창의 로그아웃 버튼
 
 TARGET_CASE_REGISTER = "case_register"  # 검사 등록 화면
 TARGET_REVIEW_ASSIGN = "review_assign"  # 검토 배정 화면
@@ -96,7 +99,7 @@ MSG_NO_RESULT = "조건에 맞는 검사가 없습니다. 검색 조건을 변�
 MSG_NO_SELECTION = "목록에서 검사를 선택하면 상세 정보가 표시됩니다."
 MSG_LOAD_FAILED = "검사 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
 MSG_EDIT_NOT_ALLOWED = "본인이 등록한 미배정 검사만 수정할 수 있습니다."
-MSG_INVALID_DATES = "등록일 시작일이 종료일보다 늦을 수 없습니다."
+MSG_INVALID_DATES = "등록일 시작일이 종료일보다 늦을 수 없습니다."  # 달력이 기간을 자동 정렬해서 보통은 나오지 않음(안전장치)
 USER_NAME_FALLBACK = "사용자"  # 사용자 정보에 이름이 없을 때 상단 바에 표시
 
 # ── 세션 상태 키 ─────────────────────────────────────────────────────────────
@@ -153,14 +156,14 @@ class ExamRecord:
     """검사 목록 한 줄과 상세 패널에 표시할 정보."""
 
     case_id: str
-    accession_no: str  # 접수번호. 팀 데이터에 없어 case_id를 씁니다(화면 상세에는 "케이스 ID"로 case_id를 표시).
+    accession_no: str  # 접수번호. 팀 데이터에 없어 case_id와 같은 값(지금 화면에서는 쓰지 않음)
     patient_id: str
     patient_name: str
     patient_sex: str  # "남" / "여" / "" (알 수 없음)
     patient_age: int | None
     modality: str  # 검사 장비(백엔드 exam_type). CT, MR, CR, US ...
     exam_name: str  # 검사명(백엔드 exam_info)
-    exam_at: datetime | None  # 검사 시각. 상세 패널의 검사일시에만 표시합니다.
+    exam_at: datetime | None  # 검사 시각(백엔드 exam_at). 상세 패널의 검사일시에만 표시. 아직 저장되지 않으면 "-"
     registered_at: datetime  # 등록 시각(백엔드 created_at). 목록의 시간 표시·정렬·기간 검색 기준입니다.
     status: str  # STATUS_OPTIONS 중 하나(화면 상태)
     department: str  # 진료과 이름(departments 문서의 name). 없으면 ""
@@ -192,7 +195,6 @@ def _clean(value: object) -> str:
     """None은 빈 칸으로, 나머지는 앞뒤 공백을 지운 글자로 바꿉니다."""
     return "" if value is None else str(value).strip()
 
-# 로그인 결과(백엔드가 준 사전 형태의 데이터)를 검사 목록 화면이 쓰는 CurrentUser 형태로 바꿔 주는 함수
 def current_user_from_profile(profile: Mapping[str, object]) -> CurrentUser:
     """로그인으로 확인된 사용자 정보(dict)를 이 화면의 CurrentUser로 바꿉니다(app.py에서 호출).
 
@@ -222,6 +224,7 @@ def role_label(user: CurrentUser) -> str:
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
 
+# 단독 실행 미리보기용 사용자(Firestore에 없는 가상 사용자)
 _PREVIEW_USER = CurrentUser(uid="preview-registrar", role=ROLE_REGISTRAR, name="김의사")
 
 
@@ -1228,6 +1231,7 @@ def _filter_key(name: str) -> str:
 
 
 def _normalize_dates(value: object) -> tuple[date, date] | None:
+    """등록일 칸에 저장된 값(날짜 하나 또는 (시작, 종료))을 (시작, 종료)로 맞춥니다. 알 수 없으면 None."""
     if isinstance(value, date):
         return value, value
     if isinstance(value, (tuple, list)) and value:
@@ -1460,7 +1464,10 @@ def _render_stats(exams: list[ExamRecord]) -> None:
 
 
 def _render_calendar() -> None:
-    """등록일 기간 선택 달력(Figma "검사일 · 기간 선택 달력", 336 폭). 등록일 칸 바로 아래에 뜹니다."""
+    """등록일 기간 선택 달력(Figma "검사일 · 기간 선택 달력"). 등록일 칸 바로 아래에 같은 폭으로 뜹니다.
+
+    날짜를 누를 때마다 화면이 다시 그려지고, 고르는 중인 기간은 _CAL_DRAFT_KEY에 있다가 적용을 눌러야 칸에 들어갑니다.
+    """
     state = st.session_state
     start, end = state.get(_CAL_DRAFT_KEY) or _pending_dates()
     month = state.get(_CAL_MONTH_KEY) or _month_start(end or start)
@@ -1635,7 +1642,7 @@ def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
             _text(f"pacs_list_dlabel_{index}", label)
             _text(f"pacs_list_dvalue_{index}", value or "-")
 
-        # 수정 버튼은 등록 담당자에게만 보이고, 본인이 등록한 수정 가능 상태의 검사에서만 누를 수 있습니다.
+        # 수정 버튼은 등록 담당자에게만 보이고, 본인이 등록한 미배정 검사에서만 누를 수 있습니다(can_edit).
         if is_registrar(user):
             allowed = can_edit(user, exam)
             with st.container(key="pacs_list_edit"):
@@ -1711,7 +1718,7 @@ if __name__ == "__main__":
         st.rerun()
     elif event is not None:
         preview_messages = {
-            EVENT_EDIT: "수정 화면은 준비 중입니다.",
+            EVENT_EDIT: "수정 화면(검사 등록 수정 모드) 이동은 app.py 연결 후 동작합니다.",
             EVENT_OPEN_VIEWER: "영상 뷰어 화면은 준비 중입니다.",
         }
         targets = {TARGET_CASE_REGISTER: "검사 등록", TARGET_REVIEW_ASSIGN: "검토 배정"}
