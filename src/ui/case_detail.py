@@ -10,6 +10,7 @@ from src.exception import AppError, ValidationError
 from src.models import Case, CaseStatus, ProcessingParameters, ProcessingResult, ReviewRecord, ROI
 from src.processing.image_io import validate_grayscale_image
 from src.processing.roi import analyze_roi
+from src.services import processing
 from src.ui.components.image_viewer import render_histograms, render_images, render_thumbnails
 
 
@@ -38,6 +39,7 @@ class ViewerResult:
     label: str
     pixels: np.ndarray
     result_id: str | None = None
+    preview: processing.ProcessingPreview | None = None
 
 
 @dataclass
@@ -395,6 +397,28 @@ def _render_report(
                 st.text(record["content"])
 
 
+def _bind_processing_service(
+    uid: str, case_id: str, input_file_id: str,
+) -> tuple[ProcessImage, SaveViewerResult, OpenViewerResult]:
+    def run(algorithm: str, parameters: ProcessingParameters) -> ViewerResult:
+        preview = processing.create_processing_preview(uid, case_id, input_file_id, algorithm, parameters)
+        return ViewerResult(f"처리 결과 ({algorithm})", preview.pixels, preview=preview)
+
+    def save(
+        result: ViewerResult, _algorithm: str, _parameters: ProcessingParameters, roi: ROI | None,
+    ) -> ViewerResult:
+        if result.preview is None:
+            raise ValidationError("저장할 처리 결과를 찾을 수 없어요.")
+        record = processing.save_processing_preview(uid, case_id, input_file_id, result.preview, roi)
+        return ViewerResult(result.label, result.pixels, record["processing_result_id"])
+
+    def open_result(result_id: str) -> ViewerResult:
+        saved = processing.open_processing_result(uid, case_id, input_file_id, result_id)
+        return ViewerResult(f"처리 결과 ({saved.record['processing_type_id']})", saved.pixels, result_id)
+
+    return run, save, open_result
+
+
 def render(
     case: Case | None,
     source: ViewerSource | None,
@@ -416,11 +440,14 @@ def render(
     save_report: Callable[[str], None] | None = None,
     complete_review: Callable[[], None] | None = None,
     completion_block_reason: str | None = None,
+    processing_uid: str | None = None,
 ) -> None:
     """Render an already-authorized case passed by the application layer.
 
     Any processing callback is responsible for authorizing the operation itself.
     Pass only cases the current user is allowed to view. The application loads the selected case.
+    If supplied, processing_uid comes from the authenticated session and selects the real
+    processing callbacks and history in place of the standalone viewer callbacks.
     """
     st.title("영상 뷰어")
     expanded = st.toggle("크게 보기", key=f"{key}-expanded")
@@ -448,6 +475,15 @@ def render(
     except ValidationError as error:
         workspace.error(str(error))
         return
+
+    if processing_uid is not None:
+        case_id = case["case_id"]
+        try:
+            processing_records = processing.list_image_processing_history(processing_uid, case_id, source.file_id)
+        except AppError as error:
+            workspace.error(str(error))
+            return
+        process_image, save_result, open_result = _bind_processing_service(processing_uid, case_id, source.file_id)
 
     # key is scoped by the integrating screen to the authenticated user/session.
     key = f"{key}-{case['case_id']}-{source.file_id}"

@@ -1,11 +1,20 @@
-"""Run image processing for callers that have checked case access."""
+"""Run image processing and manage results within an authorized case."""
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import cast
+from uuid import uuid4
 
 import cv2
 import numpy as np
 
-from src.exception import AppError, ValidationError
-from src.models import ProcessingParameters
+from src.exception import AppError, ConflictError, NotFoundError, PermissionDeniedError, ValidationError
+from src.models import Case, FileInfo, ProcessingParameters, ProcessingResult, ROI
 from src.processing.algorithm import apply_canny, apply_clahe, apply_median
+from src.processing.image_io import decode_image, encode_png
+from src.processing.roi import analyze_roi
+from src.repositories import case as cases, file_storage, image as images, processing as records
+from src.services import access_policy
 
 
 _ALGORITHMS = {
@@ -30,3 +39,157 @@ def run_processing(
         return apply_algorithm(original, **parameters)
     except cv2.error as error:
         raise AppError("영상처리 중 오류가 발생했어요.") from error
+
+
+@dataclass(frozen=True)
+class ProcessingPreview:
+    record: ProcessingResult
+    pixels: np.ndarray
+
+
+def _get_case(case_id: str) -> Case:
+    case = cases.get_case(case_id)
+    if case is None:
+        raise NotFoundError("해당 검사를 찾을 수 없어요.")
+    return cast(Case, case)
+
+
+def _require_processing(uid: str, case_id: str) -> None:
+    case = _get_case(case_id)
+    access_policy.require_case_processing(uid, case, cases.get_case_assignment(case_id))
+    if case["status"] != "검토 중":
+        raise ConflictError("검토 중인 검사에서만 영상처리를 할 수 있어요.")
+
+
+def _get_original(case_id: str, input_file_id: str) -> FileInfo:
+    original = images.get_file_info(input_file_id)
+    if original is None or original["case_id"] != case_id or original["kind"] != "ORIGINAL":
+        raise NotFoundError("선택한 검사의 원본 영상을 찾을 수 없어요.")
+    return original
+
+
+def create_processing_preview(
+    uid: str, case_id: str, input_file_id: str, algorithm: str, parameters: ProcessingParameters,
+) -> ProcessingPreview:
+    """Process the actual case file and keep the metadata for a later save."""
+    _require_processing(uid, case_id)
+    original = _get_original(case_id, input_file_id)
+    pixels = decode_image(file_storage.read_file(original["storage_path"]))
+    settings = dict(parameters)
+    started_at = datetime.now(timezone.utc)
+    result = run_processing(pixels, algorithm, settings)
+    completed_at = datetime.now(timezone.utc)
+    return ProcessingPreview({
+        "processing_result_id": uuid4().hex,
+        "case_id": case_id,
+        "processing_type_id": algorithm,
+        "algorithm_version": "1",
+        "parameters": settings,
+        "performed_by": uid,
+        "input_file_id": input_file_id,
+        "status": "COMPLETED",
+        "roi": None,
+        "statistics": None,
+        "error_message": None,
+        "created_at": started_at,
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }, result)
+
+
+def _save_result_png(case_id: str, result_id: str, png: bytes) -> str:
+    try:
+        return file_storage.save_file(case_id, result_id, png, "png")
+    except ConflictError:
+        # A prior attempt may have written the PNG before its metadata became available.
+        path = f"cases/{case_id}/files/{result_id}.png"
+        if file_storage.read_file(path) != png:
+            raise ConflictError("같은 저장 위치에 다른 결과 영상이 있습니다.") from None
+        return path
+
+
+def _confirm_saved_result(expected: ProcessingResult) -> ProcessingResult | None:
+    saved = records.get_processing_result(expected["case_id"], expected["processing_result_id"])
+    if saved is None:
+        return None
+    match_fields = ("input_file_id", "performed_by", "processing_type_id", "parameters", "roi", "status")
+    if any(saved[field] != expected[field] for field in match_fields):
+        raise ConflictError("다른 설정 또는 ROI로 저장된 결과예요. 이력에서 다시 열어 주세요.")
+    return saved
+
+
+def save_processing_preview(
+    uid: str, case_id: str, input_file_id: str, preview: ProcessingPreview, roi: ROI | None,
+) -> ProcessingResult:
+    """Save an authorized preview and publish its linked metadata together."""
+    _require_processing(uid, case_id)
+    record = preview.record
+    if record["case_id"] != case_id or record["input_file_id"] != input_file_id or record["performed_by"] != uid:
+        raise PermissionDeniedError("현재 선택한 원본 영상의 처리 결과만 저장할 수 있어요.")
+    original = _get_original(case_id, input_file_id)
+    png = encode_png(preview.pixels)
+    if roi is not None:
+        original_pixels = decode_image(file_storage.read_file(original["storage_path"]))
+        statistics = analyze_roi(original_pixels, roi)
+    else:
+        statistics = None
+    now = datetime.now(timezone.utc)
+    result: ProcessingResult = {**record, "created_at": now, "roi": roi, "statistics": statistics}
+    saved = _confirm_saved_result(result)
+    if saved is not None:
+        return saved
+
+    result_id = record["processing_result_id"]
+    path = _save_result_png(case_id, result_id, png)
+    output: FileInfo = {
+        "file_id": result_id,
+        "case_id": case_id,
+        "processing_result_id": result_id,
+        "kind": "RESULT",
+        "original_name": f"{result_id}.png",
+        "storage_path": path,
+        "content_type": "image/png",
+        "size_bytes": len(png),
+        "uploaded_by": uid,
+        "created_at": now,
+    }
+    try:
+        records.save_processing_result_with_file(result, output)
+    except ConflictError:
+        saved = _confirm_saved_result(result)
+        if saved is None:
+            raise
+        return saved
+    return result
+
+
+def _require_read(uid: str, case_id: str) -> None:
+    case = _get_case(case_id)
+    access_policy.require_case_access(uid, case, cases.get_case_assignment(case_id))
+
+
+def list_image_processing_history(uid: str, case_id: str, input_file_id: str) -> list[ProcessingResult]:
+    """List results only for the authorized case and selected original."""
+    _require_read(uid, case_id)
+    _get_original(case_id, input_file_id)
+    return records.list_processing_results(case_id, input_file_id=input_file_id)
+
+
+def open_processing_result(
+    uid: str, case_id: str, input_file_id: str, result_id: str,
+) -> ProcessingPreview:
+    """Read the saved pixels for the authorized original and processing record."""
+    _require_read(uid, case_id)
+    _get_original(case_id, input_file_id)
+    record = records.get_processing_result(case_id, result_id)
+    if record is None or record["input_file_id"] != input_file_id or record["status"] != "COMPLETED":
+        raise NotFoundError("선택한 원본 영상의 처리 결과를 찾을 수 없어요.")
+    matching = [
+        file for file in images.list_case_files(case_id, kind="RESULT")
+        if file["case_id"] == case_id and file["kind"] == "RESULT" and file["processing_result_id"] == result_id
+    ]
+    if not matching:
+        raise NotFoundError("저장된 결과 영상 파일을 찾을 수 없어요.")
+    if len(matching) != 1:
+        raise ConflictError("처리 기록에 결과 영상이 여러 개 연결되어 있어요.")
+    return ProcessingPreview(record, decode_image(file_storage.read_file(matching[0]["storage_path"])))
