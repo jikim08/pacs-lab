@@ -23,6 +23,7 @@ app.py에서 함께 쓰는 함수:
 from __future__ import annotations
 
 import base64
+import calendar
 import logging
 import re
 import time
@@ -108,6 +109,14 @@ _FILTER_VERSION_KEY = "_pacs_list_filter_version"
 _SELECTED_KEY = "_pacs_list_selected_case"
 _EVENT_KEY = "_pacs_list_event"
 _NOTICE_KEY = "_pacs_list_notice"
+# 등록일 달력: 열림 여부, 고르는 중인 기간(시작일, 종료일 또는 None), 달력에 보이는 달(1일)
+_CAL_OPEN_KEY = "_pacs_list_cal_open"
+_CAL_DRAFT_KEY = "_pacs_list_cal_draft"
+_CAL_MONTH_KEY = "_pacs_list_cal_month"
+
+# 등록일 달력의 빠른 기간 버튼: (key 이름, 표시 글자, 오늘을 포함한 일수)
+CALENDAR_PRESETS = (("today", "오늘", 1), ("week", "최근 7일", 7), ("month", "최근 30일", 30))
+WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
 
 
 # ── 데이터 형식 ──────────────────────────────────────────────────────────────
@@ -511,6 +520,14 @@ _ICON_SEARCH_BUTTON = _svg(18, 18, (
 ))
 
 
+# 등록일 달력과 선택 메뉴 아이콘(Figma "검사일 · 기간 선택 달력", "선택 메뉴"에서 받은 20×20 SVG)
+_FIGMA_STROKE = f'stroke-width="1.41667" {_STROKE} stroke="#626262"'
+_ICON_CLOSE = _svg(20, 20, f'<path d="M5 5L15 15M15 5L5 15" {_FIGMA_STROKE}/>')
+_ICON_MONTH_PREV = _svg(20, 20, f'<path d="M12.5 5L7.5 10L12.5 15" {_FIGMA_STROKE}/>')
+_ICON_MONTH_NEXT = _svg(20, 20, f'<path d="M7.5 5L12.5 10L7.5 15" {_FIGMA_STROKE}/>')
+_ICON_CHECK = _svg(20, 20, f'<path d="M4.16667 10L8.33333 14.1667L15.8333 5.83333" {_FIGMA_STROKE}/>')
+
+
 def _css_icon(svg: str) -> str:
     """CSS background-image에 넣을 수 있는 data URI를 만듭니다."""
     return "url('data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii") + "')"
@@ -790,22 +807,148 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   background:#fff @ICON_SEARCH_FIELD@ calc(12 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
 }
 .st-key-pacs_list_field_query input { padding:0 calc(12 * var(--u)) 0 calc(39 * var(--u)) !important; }
-/* 검사일 칸: Streamlit 달력 버튼을 왼쪽으로 옮겨 디자인의 달력 아이콘으로 바꿉니다(누르면 달력이 열림). */
-.st-key-pacs_list_field_dates [data-testid="stDateInputField"] { align-items:center; padding:0 !important; }
-.st-key-pacs_list_field_dates [data-testid="stDateInputField"] > div:last-child {
-  order:-1; flex:0 0 auto; width:calc(39 * var(--u)) !important; height:100%; padding:0 !important;
+/* 등록일 칸: 버튼을 입력칸 모양으로(왼쪽 달력 아이콘 (12, 12) 18×18, 글자는 x 39부터). 누르면 아래 달력이 열림 */
+.st-key-pacs_list_field_dates { position:relative !important; overflow:visible !important; }
+.st-key-pacs_list_dates_button button {
+  width:100% !important; height:calc(42 * var(--u)) !important; min-height:0 !important;
+  padding:0 calc(12 * var(--u)) 0 calc(39 * var(--u)) !important; justify-content:flex-start !important;
+  background:#fff @ICON_CALENDAR@ calc(12 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
+  border:1px solid #d7d7d7 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
+  color:#444 !important; font-size:calc(12 * var(--u)) !important; font-weight:400 !important; cursor:pointer;
 }
-.st-key-pacs_list_field_dates [data-testid="stDateInputCalendarButton"] {
-  width:100% !important; height:100% !important; padding:0 !important; border:0 !important; cursor:pointer;
-  background:transparent @ICON_CALENDAR@ calc(12 * var(--u)) center / calc(18 * var(--u)) no-repeat !important;
+.st-key-pacs_list_dates_button button > div { justify-content:flex-start !important; width:100%; }
+.st-key-pacs_list_dates_button button p { font-size:calc(12 * var(--u)) !important; white-space:pre; }
+.st-key-pacs_list_dates_button button:hover,
+.st-key-pacs_list_dates_box_open .st-key-pacs_list_dates_button button { border-color:#555 !important; }
+
+/* ── 등록일 기간 선택 달력: 등록일 칸과 같은 폭, 안쪽 여백 20, 줄 간격 16 (Figma "검사일 · 기간 선택 달력") ── */
+.st-key-pacs_list_cal_backdrop {
+  position:fixed !important; inset:0; z-index:30; width:100vw !important; height:100vh !important; opacity:0;
 }
-.st-key-pacs_list_field_dates [data-testid="stDateInputCalendarButton"] svg { display:none !important; }
-.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"],
-.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] * {
-  font-family:inherit !important; font-size:calc(12 * var(--u)) !important; color:#444 !important; letter-spacing:0 !important;
+.st-key-pacs_list_cal_backdrop * { width:100% !important; height:100% !important; cursor:default !important; }
+.st-key-pacs_list_stage .st-key-pacs_list_cal {
+  position:absolute !important; z-index:31; left:0; top:calc(100% + 6 * var(--u));
+  width:100% !important; min-width:0 !important; max-width:none !important;  /* 등록일 칸(280)과 같은 폭 */
+  padding:calc(20 * var(--u)) !important; gap:calc(16 * var(--u)) !important;
+  background:#fff; border:1px solid #dedede; border-radius:calc(8 * var(--u));
+  box-shadow:0 calc(8 * var(--u)) calc(24 * var(--u)) rgba(0, 0, 0, 0.12);
+  color:#252525; line-height:1.5;
 }
-.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] > div { padding:0 !important; }
-.st-key-pacs_list_field_dates [data-testid="stDateInputFieldsScroller"] > span { padding:0 calc(8 * var(--u)) !important; }
+.st-key-pacs_list_cal > div { width:100% !important; max-width:none !important; }
+/* 달력 안 버튼: Streamlit 기본 모양을 없애고 칸을 꽉 채웁니다(:where로 우선순위를 낮춰 아래 개별 크기가 이기게 함). */
+.st-key-pacs_list_cal :where([data-testid="stElementContainer"], [data-testid="stButton"]) { width:100% !important; height:100% !important; }
+/* 버튼을 줄 기준선이 아닌 칸 위쪽에 맞춥니다(아이콘만 있는 버튼이 아래로 밀리지 않게). */
+.st-key-pacs_list_cal [data-testid="stButton"] { display:flex !important; line-height:0; }
+.st-key-pacs_list_cal button {
+  width:100% !important; height:100% !important; min-height:0 !important; padding:0 !important;
+  border:0 !important; border-radius:calc(5 * var(--u)) !important; background:transparent !important; box-shadow:none !important;
+  color:inherit !important; font-size:inherit !important; font-weight:inherit !important; line-height:1.5 !important;
+}
+.st-key-pacs_list_cal button p { font-size:inherit !important; font-weight:inherit !important; line-height:inherit !important; }
+/* 제목 줄: 15 Bold + 닫기 20×20 */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_head { flex-wrap:nowrap !important; align-items:center !important; }
+.st-key-pacs_list_cal_head > div:first-child { flex:1 1 auto !important; min-width:0; }
+.st-key-pacs_list_cal_title { font-size:calc(15 * var(--u)); font-weight:700; color:#252525; }
+.st-key-pacs_list_cal_head > div:last-child, .st-key-pacs_list_cal_close {
+  flex:0 0 auto !important; width:calc(20 * var(--u)) !important; height:calc(20 * var(--u)) !important;
+}
+.st-key-pacs_list_cal_close button, .st-key-pacs_list_cal_prev button, .st-key-pacs_list_cal_next button {
+  font-size:0 !important; background-position:center !important; background-size:calc(20 * var(--u)) !important;
+  background-repeat:no-repeat !important; cursor:pointer;
+}
+.st-key-pacs_list_cal_close button { background-image:@ICON_CLOSE@ !important; }
+.st-key-pacs_list_cal_close button p, .st-key-pacs_list_cal_prev button p, .st-key-pacs_list_cal_next button p { font-size:0 !important; }
+/* 시작일·종료일 칸: 143×59, 배경 #f5f5f5, 사이 8 */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_range { flex-wrap:nowrap !important; gap:calc(8 * var(--u)) !important; }
+.st-key-pacs_list_cal_range > div { flex:1 1 0 !important; min-width:0; }
+.st-key-pacs_list_stage [class*="st-key-pacs_list_cal_box_"] {
+  gap:calc(4 * var(--u)) !important; padding:calc(8 * var(--u)) calc(12 * var(--u)) !important;
+  background:#f5f5f5; border:1px solid #dedede; border-radius:calc(5 * var(--u));
+}
+[class*="st-key-pacs_list_cal_boxlabel_"] { font-size:calc(11 * var(--u)); color:#626262; }
+[class*="st-key-pacs_list_cal_boxvalue_"] { font-size:calc(13 * var(--u)); font-weight:500; color:#252525; }
+/* 빠른 기간 버튼: 높이 32, 사이 6, 고른 버튼은 검정 */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_presets { flex-wrap:nowrap !important; gap:calc(6 * var(--u)) !important; }
+.st-key-pacs_list_cal_presets > div { flex:0 0 auto !important; width:auto !important; }
+[class*="st-key-pacs_list_cal_preset_"] { width:auto !important; }
+[class*="st-key-pacs_list_cal_preset_"] :is([data-testid="stElementContainer"], [data-testid="stButton"]) { width:auto !important; }
+.st-key-pacs_list_cal [class*="st-key-pacs_list_cal_preset_"] button {
+  width:auto !important; height:calc(32 * var(--u)) !important; padding:0 calc(10 * var(--u)) !important;
+  border:1px solid #dedede !important; background:#fff !important; color:#252525 !important;
+  font-size:calc(13 * var(--u)) !important; font-weight:500 !important; cursor:pointer; white-space:nowrap;
+}
+.st-key-pacs_list_cal [class*="st-key-pacs_list_cal_preset_"] button:hover { background:#f5f5f5 !important; }
+.st-key-pacs_list_cal [class*="st-key-pacs_list_cal_preset_on_"] button {
+  background:#252525 !important; border-color:#252525 !important; color:#fff !important;
+}
+/* 구분선 */
+.st-key-pacs_list_cal_rule_top, .st-key-pacs_list_cal_rule_bottom {
+  height:1px !important; min-height:1px; flex:0 0 auto !important; overflow:hidden;
+  background:#dedede; font-size:0 !important; line-height:0 !important;
+}
+/* 월 이동: 양 끝 20×20 화살표, 가운데 14 Bold */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_nav { flex-wrap:nowrap !important; align-items:center !important; justify-content:space-between !important; }
+.st-key-pacs_list_cal_nav > div { flex:0 0 auto !important; width:auto !important; }
+.st-key-pacs_list_cal_prev, .st-key-pacs_list_cal_next,
+:is(.st-key-pacs_list_cal_prev, .st-key-pacs_list_cal_next, .st-key-pacs_list_cal_close) :is([data-testid="stButton"], button) {
+  width:calc(20 * var(--u)) !important; height:calc(20 * var(--u)) !important;
+}
+.st-key-pacs_list_cal_prev button { background-image:@ICON_MONTH_PREV@ !important; }
+.st-key-pacs_list_cal_next button { background-image:@ICON_MONTH_NEXT@ !important; }
+.st-key-pacs_list_cal_month { font-size:calc(14 * var(--u)); font-weight:700; color:#252525; white-space:nowrap; }
+/* 날짜 표: 요일 줄 높이 24, 날짜 칸은 폭을 7등분 × 높이 34, 줄 사이 4 */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_grid { gap:calc(4 * var(--u)) !important; }
+.st-key-pacs_list_stage :is(.st-key-pacs_list_cal_weekdays, [class*="st-key-pacs_list_cal_week_"]) { flex-wrap:nowrap !important; }
+:is(.st-key-pacs_list_cal_weekdays, [class*="st-key-pacs_list_cal_week_"]) > div { flex:1 1 0 !important; width:auto !important; min-width:0 !important; }
+[class*="st-key-pacs_list_cal_wd_"] {
+  width:100% !important; height:calc(24 * var(--u)) !important; flex:0 0 auto !important; display:flex !important;
+  flex-direction:column; justify-content:center; font-size:calc(11 * var(--u)); color:#626262;
+}
+[class*="st-key-pacs_list_cal_d_"] {
+  width:100% !important; height:calc(34 * var(--u)) !important; flex:0 0 auto !important;
+  border-radius:calc(5 * var(--u)); font-size:calc(12 * var(--u)); color:#626262;
+}
+[class*="st-key-pacs_list_cal_d_"] button { cursor:pointer; }
+[class*="st-key-pacs_list_cal_d_in_"]:hover, [class*="st-key-pacs_list_cal_d_out_"]:hover { background:#f5f5f5; }
+[class*="st-key-pacs_list_cal_d_out_"] { color:#a1a1a1; }
+[class*="st-key-pacs_list_cal_d_mid_"] { background:#f5f5f5; color:#252525; }
+[class*="st-key-pacs_list_cal_d_sel_"] { background:#252525; color:#fff; font-weight:700; }
+/* 아래 줄: 고른 기간(11) + 적용 버튼(검정, 높이 42) */
+.st-key-pacs_list_stage .st-key-pacs_list_cal_foot {
+  flex-wrap:nowrap !important; align-items:flex-start !important; justify-content:space-between !important; gap:calc(8 * var(--u)) !important;
+}
+.st-key-pacs_list_cal_foot > div { flex:0 1 auto !important; width:auto !important; min-width:0; }
+.st-key-pacs_list_cal_summary { font-size:calc(11 * var(--u)); color:#626262; }
+.st-key-pacs_list_cal_apply { width:auto !important; flex:0 0 auto !important; }
+.st-key-pacs_list_cal_apply :is([data-testid="stElementContainer"], [data-testid="stButton"]) { width:auto !important; }
+.st-key-pacs_list_cal .st-key-pacs_list_cal_apply button {
+  width:auto !important; height:calc(42 * var(--u)) !important; padding:0 calc(16 * var(--u)) !important;
+  background:#252525 !important; color:#fff !important; font-size:calc(13 * var(--u)) !important; font-weight:500 !important; cursor:pointer;
+}
+.st-key-pacs_list_cal .st-key-pacs_list_cal_apply button:hover { background:#3a3a3a !important; }
+
+/* ── 검사 장비·검토 상태 선택 메뉴 (Figma "선택 메뉴"): 화면 높이 기준 크기(메뉴는 화면 밖 층에 그려져 --u를 못 씀) ── */
+[data-testid="stSelectboxVirtualDropdown"] {
+  height:auto !important; max-height:none !important; padding:calc(6 * 100vh / 960) !important;
+  background:#fff !important; border:1px solid #dedede !important; border-radius:calc(8 * 100vh / 960) !important;
+  box-shadow:0 calc(8 * 100vh / 960) calc(24 * 100vh / 960) rgba(0, 0, 0, 0.12) !important;
+  font-family:'Noto Sans KR', sans-serif !important;
+}
+[data-testid="stSelectboxVirtualDropdown"] [role="listbox"] {
+  height:auto !important; max-height:none !important; display:flex !important; flex-direction:column; gap:calc(2 * 100vh / 960);
+}
+[data-testid="stSelectboxVirtualDropdown"] [role="option"] { height:calc(36 * 100vh / 960) !important; padding:0 !important; }
+[data-testid="stSelectboxVirtualDropdown"] [role="option"] > div {
+  display:flex !important; align-items:center; width:100%; height:100% !important;
+  padding:0 calc(10 * 100vh / 960) !important; border-radius:calc(4 * 100vh / 960) !important;
+  background:transparent !important; color:#252525 !important;
+  font-size:calc(12 * 100vh / 960) !important; font-weight:400; line-height:1.5;
+}
+[data-testid="stSelectboxVirtualDropdown"] [role="option"]:hover > div { background:#fafafa !important; }
+[data-testid="stSelectboxVirtualDropdown"] [role="option"][aria-selected="true"] > div {
+  background:#f5f5f5 @ICON_CHECK@ right calc(10 * 100vh / 960) center / calc(20 * 100vh / 960) no-repeat !important;
+  font-weight:700;
+}
 /* 선택 상자: 글자 x 13, 오른쪽 ▾ 아이콘 (13, 11) */
 [class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] > div > div { display:flex; align-items:center; overflow:hidden; }
 [class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] input {
@@ -1000,6 +1143,10 @@ _STYLE = (
     .replace("@ICON_CALENDAR@", _css_icon(_ICON_CALENDAR))
     .replace("@ICON_CHEVRON_DOWN@", _css_icon(_ICON_CHEVRON_DOWN))
     .replace("@ICON_SEARCH_BUTTON@", _css_icon(_ICON_SEARCH_BUTTON))
+    .replace("@ICON_CLOSE@", _css_icon(_ICON_CLOSE))
+    .replace("@ICON_MONTH_PREV@", _css_icon(_ICON_MONTH_PREV))
+    .replace("@ICON_MONTH_NEXT@", _css_icon(_ICON_MONTH_NEXT))
+    .replace("@ICON_CHECK@", _css_icon(_ICON_CHECK))
 )
 
 
@@ -1029,12 +1176,95 @@ def _normalize_dates(value: object) -> tuple[date, date] | None:
     return None
 
 
+def _pending_dates() -> tuple[date, date]:
+    """등록일 칸에 지금 들어 있는 기간(검색 버튼을 누르기 전). 고른 적이 없으면 기본 기간(최근 7일)입니다."""
+    dates = _normalize_dates(st.session_state.get(_filter_key("dates")))
+    if dates:
+        return dates
+    defaults = default_filter()
+    return defaults.start, defaults.end
+
+
+def _preset_range(days: int) -> tuple[date, date]:
+    """오늘을 포함한 최근 days일 기간."""
+    today = _today()
+    return today - timedelta(days=days - 1), today
+
+
+def _month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+def _shift_month(month: date, step: int) -> date:
+    index = month.year * 12 + month.month - 1 + step
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def _calendar_weeks(month: date) -> list[list[date]]:
+    """month가 들어 있는 달력의 주(일요일 시작). 앞뒤 달의 날짜도 칸을 채우려고 함께 들어갑니다."""
+    return calendar.Calendar(firstweekday=6).monthdatescalendar(month.year, month.month)
+
+
+def _cal_toggle() -> None:
+    """등록일 칸을 누르면 달력을 열고(지금 칸의 기간으로 시작), 열려 있으면 닫습니다."""
+    state = st.session_state
+    if state.get(_CAL_OPEN_KEY):
+        _cal_close()
+        return
+    start, end = _pending_dates()
+    state[_CAL_OPEN_KEY] = True
+    state[_CAL_DRAFT_KEY] = (start, end)
+    state[_CAL_MONTH_KEY] = _month_start(end)
+
+
+def _cal_close() -> None:
+    """달력을 닫습니다. 적용 버튼을 누르지 않았으면 고르던 기간은 버립니다."""
+    for key in (_CAL_OPEN_KEY, _CAL_DRAFT_KEY, _CAL_MONTH_KEY):
+        st.session_state.pop(key, None)
+
+
+def _cal_pick(day: date) -> None:
+    """날짜를 누르면 기간을 고릅니다: 첫 번째는 시작일, 두 번째는 종료일(앞 날짜를 누르면 둘을 바꿔 정렬)."""
+    state = st.session_state
+    start, end = state.get(_CAL_DRAFT_KEY) or (day, day)
+    if end is not None:
+        state[_CAL_DRAFT_KEY] = (day, None)  # 기간이 이미 정해져 있으면 새로 고르기 시작
+    elif day < start:
+        state[_CAL_DRAFT_KEY] = (day, start)
+    else:
+        state[_CAL_DRAFT_KEY] = (start, day)
+    if _month_start(day) != state.get(_CAL_MONTH_KEY):
+        state[_CAL_MONTH_KEY] = _month_start(day)  # 앞뒤 달의 날짜를 누르면 그 달로 넘어갑니다
+
+
+def _cal_preset(days: int) -> None:
+    st.session_state[_CAL_DRAFT_KEY] = _preset_range(days)
+    st.session_state[_CAL_MONTH_KEY] = _month_start(_today())
+
+
+def _cal_move(step: int) -> None:
+    state = st.session_state
+    state[_CAL_MONTH_KEY] = _shift_month(state.get(_CAL_MONTH_KEY) or _month_start(_today()), step)
+
+
+def _cal_apply() -> None:
+    """고른 기간을 등록일 칸에 넣고 달력을 닫습니다. 실제 목록 검색은 검색 버튼을 누를 때 적용됩니다.
+
+    종료일을 고르지 않았으면 시작일 하루만 고른 것으로 봅니다.
+    """
+    state = st.session_state
+    draft = state.get(_CAL_DRAFT_KEY)
+    if draft:
+        start, end = draft
+        state[_filter_key("dates")] = (start, end or start)
+    _cal_close()
+
+
 def _on_search() -> None:
     """현재 입력한 조건을 적용하고, 필터 칸은 기본값으로 되돌립니다."""
     state = st.session_state
-    dates = _normalize_dates(state.get(_filter_key("dates")))
-    defaults = default_filter()
-    start, end = dates if dates else (defaults.start, defaults.end)
+    _cal_close()
+    start, end = _pending_dates()
     if start > end:
         state[_NOTICE_KEY] = MSG_INVALID_DATES
         return
@@ -1147,8 +1377,64 @@ def _render_stats(exams: list[ExamRecord]) -> None:
                     _text(f"pacs_list_stat_note_{name}", note)
 
 
+def _render_calendar() -> None:
+    """등록일 기간 선택 달력(Figma "검사일 · 기간 선택 달력", 336 폭). 등록일 칸 바로 아래에 뜹니다."""
+    state = st.session_state
+    start, end = state.get(_CAL_DRAFT_KEY) or _pending_dates()
+    month = state.get(_CAL_MONTH_KEY) or _month_start(end or start)
+    last = end or start
+
+    # 달력 바깥(화면 전체)을 덮는 투명 버튼: 바깥을 누르면 달력이 닫힙니다.
+    st.button("달력 닫기", key="pacs_list_cal_backdrop", on_click=_cal_close)
+    with st.container(key="pacs_list_cal"):
+        with st.container(key="pacs_list_cal_head", horizontal=True):
+            _text("pacs_list_cal_title", "등록일 선택")
+            st.button("달력 닫기", key="pacs_list_cal_close", on_click=_cal_close)
+        with st.container(key="pacs_list_cal_range", horizontal=True):
+            for name, label, value in (("start", "시작일", start), ("end", "종료일", end)):
+                with st.container(key=f"pacs_list_cal_box_{name}"):
+                    _text(f"pacs_list_cal_boxlabel_{name}", label)
+                    _text(f"pacs_list_cal_boxvalue_{name}", f"{value:%Y.%m.%d}" if value else "-")
+        with st.container(key="pacs_list_cal_presets", horizontal=True):
+            for name, label, days in CALENDAR_PRESETS:
+                active = (start, end) == _preset_range(days)
+                with st.container(key=f"pacs_list_cal_preset_{'on' if active else 'off'}_{name}"):
+                    st.button(label, key=f"pacs_list_cal_presetbtn_{name}", on_click=_cal_preset, args=(days,))
+        _text("pacs_list_cal_rule_top", " ")
+        with st.container(key="pacs_list_cal_nav", horizontal=True):
+            st.button("이전 달", key="pacs_list_cal_prev", on_click=_cal_move, args=(-1,))
+            _text("pacs_list_cal_month", f"{month.year}년 {month.month}월", align="center")
+            st.button("다음 달", key="pacs_list_cal_next", on_click=_cal_move, args=(1,))
+        with st.container(key="pacs_list_cal_grid"):
+            with st.container(key="pacs_list_cal_weekdays", horizontal=True):
+                for index, label in enumerate(WEEKDAY_LABELS):
+                    _text(f"pacs_list_cal_wd_{index}", label, align="center")
+            for week_index, week in enumerate(_calendar_weeks(month)):
+                with st.container(key=f"pacs_list_cal_week_{week_index}", horizontal=True):
+                    for day in week:
+                        if day in (start, end):
+                            kind = "sel"  # 시작일·종료일
+                        elif end is not None and start < day < end:
+                            kind = "mid"  # 기간 안의 날짜
+                        elif day.month != month.month:
+                            kind = "out"  # 앞뒤 달의 날짜
+                        else:
+                            kind = "in"
+                        with st.container(key=f"pacs_list_cal_d_{kind}_{day:%Y%m%d}"):
+                            st.button(str(day.day), key=f"pacs_list_cal_pick_{day:%Y%m%d}", on_click=_cal_pick, args=(day,))
+        _text("pacs_list_cal_rule_bottom", " ")
+        with st.container(key="pacs_list_cal_foot", horizontal=True):
+            if end is None or end == start:
+                summary = f"{start:%Y.%m.%d} 선택"
+            else:
+                summary = f"{start:%Y.%m.%d} – {last:%Y.%m.%d} 선택 · {(last - start).days + 1}일"
+            _text("pacs_list_cal_summary", summary)
+            st.button("적용", key="pacs_list_cal_apply", on_click=_cal_apply)
+
+
 def _render_filters() -> None:
-    defaults = default_filter()
+    is_calendar_open = bool(st.session_state.get(_CAL_OPEN_KEY))
+    start, end = _pending_dates()
     with st.container(key="pacs_list_filters", horizontal=True):
         with st.container(key="pacs_list_field_query"):
             _text("pacs_list_label_query", "환자 검색")
@@ -1161,13 +1447,16 @@ def _render_filters() -> None:
             )
         with st.container(key="pacs_list_field_dates"):
             _text("pacs_list_label_dates", "등록일")
-            st.date_input(
-                "등록일",
-                value=(defaults.start, defaults.end),
-                key=_filter_key("dates"),
-                format="YYYY.MM.DD",
-                label_visibility="collapsed",
-            )
+            # 등록일 칸: 누르면 아래에 기간 선택 달력이 열립니다(열려 있을 때 테두리를 진하게).
+            with st.container(key=f"pacs_list_dates_box_{'open' if is_calendar_open else 'closed'}"):
+                st.button(
+                    _md(f"{start:%Y.%m.%d}  –  {end:%Y.%m.%d}"),
+                    key="pacs_list_dates_button",
+                    width="stretch",
+                    on_click=_cal_toggle,
+                )
+            if is_calendar_open:
+                _render_calendar()
         with st.container(key="pacs_list_field_modality"):
             _text("pacs_list_label_modality", "검사 장비")
             st.selectbox("검사 장비", (ALL, *MODALITY_OPTIONS), key=_filter_key("modality"), label_visibility="collapsed")
