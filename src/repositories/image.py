@@ -1,9 +1,12 @@
 """Firestore 영상 파일 메타데이터 관리."""
 import re
+from typing import cast
 
 # firestroe가 던지는 Google 쪽 예외들 처리
 from google.api_core.exceptions import Conflict, GoogleAPICallError, RetryError
 from google.cloud import firestore
+from google.cloud.firestore_v1 import DocumentSnapshot 
+
 
 from src.exception import ConflictError, StorageError, ValidationError
 from src.firebase_client import get_db
@@ -21,6 +24,10 @@ def _validate_id(value: str, name: str) -> None:
     if not isinstance(value, str) or _ID_PATTERN.fullmatch(value) is None:
         raise ValidationError(f"{name} 형식이 올바르지 않습니다.")
 
+# Firesstore 문서를 FileInfo로 바꿔야. 실제로 file을 가져와서 다룰 수 있기 때문이다.
+def _to_file_info(document: DocumentSnapshot) -> FileInfo:
+    """Firestore 문서를 FileInfo로 바꾼다. 문서 ID를 file_id로 넣는다."""
+    return cast(FileInfo, {**document.to_dict(), "file_id": document.id})
 
 def get_file_info(file_id: str) -> FileInfo | None:
     """파일 정보를 조회한다.
@@ -28,7 +35,17 @@ def get_file_info(file_id: str) -> FileInfo | None:
     문서 ID를 file_id 필드에 포함한다.
     없으면 None을 반환한다.
     """
-    raise NotImplementedError
+    _validate_id(file_id, "file_id")
+
+    try:
+        document = get_db().collection(_FILES_COLLECTION).document(file_id).get()
+    except (GoogleAPICallError, RetryError) as error:
+        raise StorageError("파일 정보를 조회하지 못했습니다.") from error
+
+    if not document.exists:
+        return None
+
+    return _to_file_info(document)
 
 
 def list_case_files(
