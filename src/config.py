@@ -14,7 +14,7 @@ load_dotenv(BASE_DIR / ".env")
 
 # Firebase 설정
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
-FIREBASE_API_KEY = os.getenv("FIREBASE_API_KEY", "")
+FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "")
 FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "")
 
 # 상대 경로는 프로젝트 최상위 기준으로 해석
