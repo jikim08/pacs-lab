@@ -11,7 +11,12 @@ from src.repositories.user import get_user
 
 from streamlit_cookies_controller import CookieController
 
-from src.auth.session_store import create_session, delete_session
+from src.auth.session_store import (
+    create_session,
+    read_session,
+    update_session,
+    delete_session,
+)
 
 _AUTH_KEY = '_pacs_auth'
 _REFRESH_MARGIN = 60
@@ -23,7 +28,7 @@ _COOKIE_MANAGER_KEY = "_pacs_cookie_manager"
 def _load_user(id_token: str) -> User:
     try:
         identity = verify_token(id_token)
-    except Exception as error:
+    except PermissionError as error:
         raise AuthenticationError("로그인 상태를 확인할 수 없습니다.") from error
 
     profile = get_user(identity["uid"])
@@ -48,12 +53,6 @@ def save_session(id_token: str, refresh_token: str, expires_in: int) -> None:
     issued_at = time.time()
     user = _load_user(id_token)
 
-    st.session_state[_AUTH_KEY] = {
-        "uid": user["uid"],
-        "id_token": id_token,
-        "refresh_token": refresh_token,
-        "expires_at": issued_at + expires_in,
-    }
     session_data = {
         "uid": user["uid"],
         "id_token": id_token,
@@ -88,10 +87,32 @@ def get_current_user() -> User | None:
     비로그인 상태이면 None을 반환한다.
     반환하는 사용자 정보는 인증이 확인된 정보여야 한다.
     """
-    session =  st.session_state.get(_AUTH_KEY)
+    cookies = st.session_state[_COOKIE_MANAGER_KEY]
 
-    if session is None:
+    # 현재 세션에 ID가 없으면 브라우저 쿠키에서 찾습니다.
+    session_id = (
+        st.session_state.get(_SESSION_ID_KEY)
+        or cookies.get(_COOKIE_NAME)
+    )
+
+    if not isinstance(session_id, str) or not session_id:
         return None
+
+    st.session_state[_SESSION_ID_KEY] = session_id
+
+    # 현재 화면이 로그인 상태여도 서버의 유지 기한을 확인합니다.
+    stored = read_session(session_id)
+
+    if stored is None:
+        logout()
+        return None
+
+    session = st.session_state.get(_AUTH_KEY)
+
+    # 새로고침으로 사라진 현재 세션을 서버 정보로 복원합니다.
+    if session is None:
+        session = stored
+        st.session_state[_AUTH_KEY] = session
 
     required_keys = {
         "uid",
@@ -121,12 +142,20 @@ def get_current_user() -> User | None:
                     "로그인 사용자 정보가 일치하지 않습니다."
                 )
 
-            st.session_state[_AUTH_KEY] = {
+            updated_session = {
                 "uid": user["uid"],
                 "id_token": refreshed["id_token"],
                 "refresh_token": refreshed["refresh_token"],
                 "expires_at": requested_at + refreshed["expires_in"],
             }
+
+            # 새로고침 후에도 최신 토큰을 가져오도록 서버에도 반영합니다.
+            if not update_session(session_id, updated_session):
+                raise AuthenticationError(
+                    "로그인 유지 시간이 끝났습니다. 다시 로그인해 주세요."
+                )
+
+            st.session_state[_AUTH_KEY] = updated_session
 
             return user
 
@@ -140,6 +169,23 @@ def get_current_user() -> User | None:
 
 def logout() -> None:
     """현재 사용자의 인증 정보와 사용자별 세션 데이터를 정리한다."""
+    cookies = st.session_state.get(_COOKIE_MANAGER_KEY)
+
+    session_id = st.session_state.get(_SESSION_ID_KEY)
+
+    if not session_id and cookies is not None:
+        session_id = cookies.get(_COOKIE_NAME)
+
+    # 서버 기록을 먼저 삭제해 재사용을 막습니다.
+    if isinstance(session_id, str) and session_id:
+        delete_session(session_id)
+
+    # 브라우저에 남은 복원용 ID도 삭제합니다.
+    if cookies is not None:
+        if cookies.get(_COOKIE_NAME) is not None:
+            cookies.remove(_COOKIE_NAME)
+
+    # 아래에는 기존 이메일 기억 처리와 세션 정리 코드 유지    
     remember_email = st.session_state.get("_pacs_login_remember_email", False)
     email = st.session_state.get("_pacs_login_email", "")
 
