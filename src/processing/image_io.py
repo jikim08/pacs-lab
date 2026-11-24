@@ -5,7 +5,7 @@ from io import BytesIO
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 
-from src.config import MAX_IMAGE_SIZE_BYTES
+from src.config import MAX_IMAGE_SIZE_BYTES, MAX_IMAGE_SIZE_MB
 from src.exception import ValidationError
 
 
@@ -51,11 +51,14 @@ def decode_image(file_bytes: bytes) -> np.ndarray:
 
 
 def encode_png(image: np.ndarray) -> bytes:
-    """Return PNG bytes without changing the input array."""
+    """Return PNG bytes that fit the image reader's file size limit."""
     validate_grayscale_image(image)
     try:
         with BytesIO() as output:
             Image.fromarray(image).save(output, format="PNG")
-            return output.getvalue()
+            encoded = output.getvalue()
     except (OSError, ValueError) as error:
         raise ValidationError("영상 결과를 PNG로 변환할 수 없습니다.") from error
+    if len(encoded) > MAX_IMAGE_SIZE_BYTES:
+        raise ValidationError(f"처리 결과가 저장 가능한 크기({MAX_IMAGE_SIZE_MB} MiB)를 초과했어요.")
+    return encoded
