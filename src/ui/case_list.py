@@ -114,6 +114,23 @@ _CAL_OPEN_KEY = "_pacs_list_cal_open"
 _CAL_DRAFT_KEY = "_pacs_list_cal_draft"
 _CAL_MONTH_KEY = "_pacs_list_cal_month"
 
+# 화면 가운데 확인창: ("logout", None) 또는 ("edit", case_id)
+_CONFIRM_KEY = "_pacs_list_confirm"
+
+# 확인창 문구(Figma "로그아웃 확인", "검사 목록 · 수정 확인"): 제목, 안내 두 줄, 확인 버튼 글자
+CONFIRM_TEXTS = {
+    "logout": (
+        "로그아웃하시겠습니까?",
+        ("저장하지 않은 변경 사항은 사라질 수 있습니다.", "로그아웃하면 로그인 화면으로 이동합니다."),
+        "로그아웃",
+    ),
+    "edit": (
+        "수정하시겠습니까?",
+        ("선택한 환자의 검사 정보를 수정합니다.", "환자와 검사 정보를 확인한 후 진행해 주세요."),
+        "수정",
+    ),
+}
+
 # 등록일 달력의 빠른 기간 버튼: (key 이름, 표시 글자, 오늘을 포함한 일수)
 CALENDAR_PRESETS = (("today", "오늘", 1), ("week", "최근 7일", 7), ("month", "최근 30일", 30))
 WEEKDAY_LABELS = ("일", "월", "화", "수", "목", "금", "토")
@@ -949,6 +966,51 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   background:#f5f5f5 @ICON_CHECK@ right calc(10 * 100vh / 960) center / calc(20 * 100vh / 960) no-repeat !important;
   font-weight:700;
 }
+
+/* ── 확인창(로그아웃·수정): 화면 가운데 440 폭, 안쪽 여백 28, 줄 간격 20. 뒤는 뿌옇게 덮고 누르면 닫힘 ── */
+.st-key-pacs_list_modal_backdrop {
+  position:fixed !important; inset:0; z-index:40; width:100vw !important; height:100vh !important;
+  background:rgba(37, 37, 37, 0.35); backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+}
+.st-key-pacs_list_modal_backdrop * { width:100% !important; height:100% !important; }
+.st-key-pacs_list_modal_backdrop button { opacity:0; cursor:default !important; }
+.st-key-pacs_list_stage [class*="st-key-pacs_list_modal_"]:is(.st-key-pacs_list_modal_logout, .st-key-pacs_list_modal_edit) {
+  position:fixed !important; z-index:41; left:50%; top:50%; transform:translate(-50%, -50%);
+  width:calc(440 * var(--u)) !important; max-width:calc(100vw - 32px) !important;
+  padding:calc(28 * var(--u)) !important; gap:calc(20 * var(--u)) !important;
+  background:#fff; border:1px solid #dedede; border-radius:calc(8 * var(--u));
+  box-shadow:0 calc(8 * var(--u)) calc(24 * var(--u)) rgba(0, 0, 0, 0.12); line-height:1.5;
+}
+:is(.st-key-pacs_list_modal_logout, .st-key-pacs_list_modal_edit) > div { width:100% !important; }
+.st-key-pacs_list_stage .st-key-pacs_list_modal_head { flex-wrap:nowrap !important; align-items:center !important; }
+.st-key-pacs_list_modal_head > div:first-child { flex:1 1 auto !important; min-width:0; }
+.st-key-pacs_list_modal_title { font-size:calc(20 * var(--u)); font-weight:700; color:#252525; }
+.st-key-pacs_list_modal_head > div:last-child { flex:0 0 auto !important; }
+.st-key-pacs_list_modal_close, .st-key-pacs_list_modal_close :is([data-testid="stButton"], button) {
+  width:calc(20 * var(--u)) !important; height:calc(20 * var(--u)) !important;
+}
+.st-key-pacs_list_modal_close [data-testid="stButton"] { display:flex !important; line-height:0; }
+.st-key-pacs_list_modal_close button {
+  min-height:0 !important; padding:0 !important; border:0 !important; box-shadow:none !important; cursor:pointer;
+  background:transparent @ICON_CLOSE@ center / calc(20 * var(--u)) no-repeat !important;
+}
+.st-key-pacs_list_modal_close button p { font-size:0 !important; }
+.st-key-pacs_list_modal_body { font-size:calc(13 * var(--u)); color:#626262; }
+.st-key-pacs_list_stage .st-key-pacs_list_modal_actions {
+  flex-wrap:nowrap !important; justify-content:flex-end !important; gap:calc(8 * var(--u)) !important;
+}
+.st-key-pacs_list_modal_actions > div { flex:0 0 auto !important; width:auto !important; }
+:is(.st-key-pacs_list_modal_cancel, .st-key-pacs_list_modal_confirm) [data-testid="stButton"] { display:flex !important; }
+:is(.st-key-pacs_list_modal_cancel, .st-key-pacs_list_modal_confirm) button {
+  width:auto !important; height:calc(42 * var(--u)) !important; min-height:0 !important; padding:0 calc(16 * var(--u)) !important;
+  border-radius:calc(5 * var(--u)) !important; box-shadow:none !important; cursor:pointer;
+  font-size:calc(13 * var(--u)) !important; font-weight:500 !important; white-space:nowrap;
+}
+:is(.st-key-pacs_list_modal_cancel, .st-key-pacs_list_modal_confirm) button p { font-size:inherit !important; font-weight:inherit !important; }
+.st-key-pacs_list_modal_cancel button { background:#fff !important; border:1px solid #dedede !important; color:#252525 !important; }
+.st-key-pacs_list_modal_cancel button:hover { background:#f5f5f5 !important; }
+.st-key-pacs_list_modal_confirm button { background:#252525 !important; border:1px solid #252525 !important; color:#fff !important; }
+.st-key-pacs_list_modal_confirm button:hover { background:#3a3a3a !important; }
 /* 선택 상자: 글자 x 13, 오른쪽 ▾ 아이콘 (13, 11) */
 [class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] > div > div { display:flex; align-items:center; overflow:hidden; }
 [class*="st-key-pacs_list_field_"] [data-testid="stSelectbox"] input {
@@ -1260,6 +1322,25 @@ def _cal_apply() -> None:
     _cal_close()
 
 
+def _ask_confirm(kind: str, case_id: str | None = None) -> None:
+    """확인창을 띄웁니다(kind: "logout" | "edit"). 열려 있던 달력은 닫습니다."""
+    _cal_close()
+    st.session_state[_CONFIRM_KEY] = (kind, case_id)
+
+
+def _close_confirm() -> None:
+    st.session_state.pop(_CONFIRM_KEY, None)
+
+
+def _on_confirm() -> None:
+    """확인창의 확인 버튼: 로그아웃이면 EVENT_LOGOUT, 수정이면 EVENT_EDIT(case_id)을 app.py로 보냅니다."""
+    kind, case_id = st.session_state.pop(_CONFIRM_KEY, (None, None))
+    if kind == "logout":
+        _emit(EVENT_LOGOUT)
+    elif kind == "edit" and case_id:
+        _emit(EVENT_EDIT, case_id)
+
+
 def _on_search() -> None:
     """현재 입력한 조건을 적용하고, 필터 칸은 기본값으로 되돌립니다."""
     state = st.session_state
@@ -1348,7 +1429,8 @@ def _render_header(user: CurrentUser) -> None:
             _text("pacs_list_user_name", user.name or USER_NAME_FALLBACK)
         _render_clock()
         with st.container(key="pacs_list_logout"):
-            st.button("로그아웃", key="pacs_list_logout_button", on_click=_emit, args=(EVENT_LOGOUT,))
+            # 바로 로그아웃하지 않고 확인창을 띄웁니다(확인창의 로그아웃 버튼이 EVENT_LOGOUT을 보냄).
+            st.button("로그아웃", key="pacs_list_logout_button", on_click=_ask_confirm, args=("logout",))
 
 
 def _render_title() -> None:
@@ -1430,6 +1512,20 @@ def _render_calendar() -> None:
                 summary = f"{start:%Y.%m.%d} – {last:%Y.%m.%d} 선택 · {(last - start).days + 1}일"
             _text("pacs_list_cal_summary", summary)
             st.button("적용", key="pacs_list_cal_apply", on_click=_cal_apply)
+
+
+def _render_confirm(kind: str) -> None:
+    """화면 가운데 확인창(440 폭)과 뒤를 뿌옇게 덮는 배경. 배경·닫기·취소를 누르면 아무것도 하지 않고 닫힙니다."""
+    title, lines, confirm_label = CONFIRM_TEXTS[kind]
+    st.button("확인창 닫기", key="pacs_list_modal_backdrop", on_click=_close_confirm)
+    with st.container(key=f"pacs_list_modal_{kind}"):
+        with st.container(key="pacs_list_modal_head", horizontal=True):
+            _text("pacs_list_modal_title", title)
+            st.button("확인창 닫기", key="pacs_list_modal_close", on_click=_close_confirm)
+        _text("pacs_list_modal_body", "\n".join(lines))
+        with st.container(key="pacs_list_modal_actions", horizontal=True):
+            st.button("취소", key="pacs_list_modal_cancel", on_click=_close_confirm)
+            st.button(confirm_label, key="pacs_list_modal_confirm", on_click=_on_confirm)
 
 
 def _render_filters() -> None:
@@ -1549,8 +1645,8 @@ def _render_detail(user: CurrentUser, exam: ExamRecord | None) -> None:
                     width="stretch",
                     disabled=not allowed,
                     help=None if allowed else MSG_EDIT_NOT_ALLOWED,
-                    on_click=_emit,
-                    args=(EVENT_EDIT, exam.case_id),
+                    on_click=_ask_confirm,  # 확인창의 수정 버튼이 EVENT_EDIT(case_id)을 보냄
+                    args=("edit", exam.case_id),
                 )
         with st.container(key="pacs_list_viewer"):
             st.button(
@@ -1589,6 +1685,9 @@ def render(user: CurrentUser) -> ExamListEvent | None:
             _render_count(len(rows), condition)
             _render_table(rows, selected_id, load_failed)
             _render_detail(user, selected)
+        confirm = st.session_state.get(_CONFIRM_KEY)
+        if confirm and confirm[0] in CONFIRM_TEXTS:
+            _render_confirm(confirm[0])
 
     return st.session_state.pop(_EVENT_KEY, None)
 
