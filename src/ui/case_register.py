@@ -17,6 +17,8 @@ DICOM 사용 여부는 팀에서 아직 결정하지 않았습니다. DICOM 정�
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``RegisterEvent``로 화면 이동·등록을 처리합니다.
 current_user는 ``case_list.current_user_from_profile(session.get_current_user())``로 만듭니다.
+- ``start_edit(edit_target_from_case(case, files))``: 검사 목록의 수정 확인 후 호출. 기존 검사 정보가 채워진
+  수정 화면(제목 "검사 수정", 버튼 "수정 저장")이 되고, 수정 저장을 누르면 EVENT_UPDATE(draft.case_id 포함)를 돌려줍니다.
 - ``reset_state()``: 등록을 마친 뒤(저장 성공 후)와 다른 화면으로 이동할 때 호출. 입력한 검사명과 불러온 파일을 모두 지웁니다.
   취소 버튼은 화면이 직접 지웁니다. 다른 화면으로 갈 때 지우지 않으면 Streamlit이 화면에 없는 입력칸 값만 지워서
   불러온 파일만 남은 상태가 됩니다.
@@ -30,6 +32,7 @@ import base64
 import io
 import logging
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 
@@ -64,17 +67,21 @@ FILE_MISMATCH = "환자 불일치"  # 먼저 확인된 영상과 환자번호가
 FILE_FAILED = "읽기 실패"  # DICOM 파일이 아니거나 손상됨
 FILE_TOO_LARGE = "크기 초과"
 FILE_PENDING = "확인 대기"  # DICOM을 읽을 라이브러리(pydicom)가 아직 없음
+FILE_SAVED = "등록됨"  # 수정 화면: 이미 저장되어 있는 영상
 
 # 제목 오른쪽 상태 배지 문구
 BADGE_NEW = "새 검사 · 등록 전"  # 불러온 영상이 없음 (디자인 초기 상태)
 BADGE_DRAFT = "새 검사 · 작성 중"  # 영상은 확인됐지만 검사명 등 입력이 남음
 BADGE_CHECK = "영상 확인 필요"  # 확인되지 않은 영상이 있음
 BADGE_READY = "등록 준비 완료"  # 검사 등록 버튼을 누를 수 있음
+BADGE_EDIT = "기존 검사 · 수정 중"  # 수정 화면: 아직 바뀐 내용이 없거나 입력이 남음
+BADGE_EDIT_READY = "수정 준비 완료"  # 수정 화면: 수정 저장 버튼을 누를 수 있음
 
 # ── 화면 이동·등록 이벤트 (render가 돌려주는 RegisterEvent.kind / target 값) ─────────
 # EVENT_NAVIGATE, EVENT_LOGOUT, TARGET_REVIEW_ASSIGN은 검사 목록 화면과 같은 값을 씁니다.
 
 EVENT_SUBMIT = "submit_case"  # 검사 등록 버튼 (draft 포함)
+EVENT_UPDATE = "update_case"  # 수정 화면의 수정 저장 버튼 (draft.case_id에 수정할 검사)
 TARGET_CASE_LIST = "case_list"  # 검사 목록 화면 (왼쪽 메뉴, 취소 버튼)
 
 # ── 안내 문구 ────────────────────────────────────────────────────────────────
@@ -86,6 +93,7 @@ MSG_NEED_PATIENT = "영상에서 환자 정보(이름·환자번호·성별·나
 MSG_NEED_EXAM_NAME = "검사명을 입력하세요."
 MSG_DUPLICATE_FILE = "이미 추가한 파일은 제외했습니다: {names}"
 MSG_PENDING_READER = "DICOM 정보를 읽는 기능이 아직 준비되지 않았습니다."
+MSG_NO_CHANGES = "바뀐 내용이 없습니다. 검사명이나 영상을 수정해 주세요."
 
 # ── 세션 상태 키 (모두 _STATE_PREFIX로 시작, reset_state가 한꺼번에 지움) ──────────
 
@@ -97,6 +105,7 @@ _NEXT_FILE_ID_KEY = "_pacs_reg_next_file_id"  # 불러온 파일마다 붙이는
 _SUBMIT_USER_KEY = "_pacs_reg_submit_user"  # 화면을 그린 사용자(검사 등록 버튼 콜백에서 권한을 다시 확인)
 _EVENT_KEY = "_pacs_reg_event"
 _NOTICE_KEY = "_pacs_reg_notice"
+_EDIT_KEY = "_pacs_reg_edit"  # 수정 화면이면 수정할 검사(EditTarget), 새 검사 등록이면 없음
 
 
 # ── 데이터 형식 ──────────────────────────────────────────────────────────────
@@ -117,6 +126,23 @@ class DicomFile:
     patient_id: str = ""  # 환자번호(PatientID)
     patient_sex: str = ""  # "남" / "여" / ""
     patient_age: int | None = None
+    saved_file_id: str = ""  # 이미 저장된 영상(FILE_SAVED)의 백엔드 files 문서 ID. 새로 불러온 영상은 ""
+
+
+@dataclass(frozen=True)
+class EditTarget:
+    """수정할 기존 검사. 목록의 수정 확인 후 app.py가 백엔드 데이터로 만들어 start_edit()에 넘깁니다."""
+
+    case_id: str
+    patient_name: str
+    patient_id: str
+    patient_sex: str
+    patient_age: int | None
+    exam_name: str
+    modality: str
+    exam_date: date | None
+    department_id: str
+    files: tuple[DicomFile, ...]  # 이미 저장된 영상(status FILE_SAVED)
 
 
 @dataclass(frozen=True)
@@ -135,7 +161,14 @@ class CaseDraft:
     exam_date: date | None  # DICOM 검사일. create_case에 아직 exam_at 인자가 없어 저장되지 않습니다.
     files: tuple[DicomFile, ...]
     department_id: str = ""  # 등록 담당자의 소속 진료과(users 문서의 department_id). 비어 있으면 create_case가 거절합니다.
-    created_by: str = ""  # 등록 담당자 UID(로그인 사용자)
+    created_by: str = ""  # 등록 담당자 UID(로그인 사용자). 수정이면 수정한 사람
+    case_id: str = ""  # 수정이면 수정할 검사 ID, 새 검사 등록이면 ""
+    removed_file_ids: tuple[str, ...] = ()  # 수정 화면에서 뺀, 이미 저장돼 있던 영상의 files 문서 ID
+
+    @property
+    def new_files(self) -> tuple[DicomFile, ...]:
+        """새로 저장해야 하는 영상(이번에 불러온 영상). 이미 저장된 영상(FILE_SAVED)은 빠집니다."""
+        return tuple(item for item in self.files if item.status == FILE_OK)
 
     def case_create_args(self) -> dict[str, str]:
         """services.case.create_case(**args)에 그대로 넘길 인자를 만듭니다(케이스 문서만, 파일 저장은 별도)."""
@@ -152,7 +185,7 @@ class CaseDraft:
 class RegisterEvent:
     """사용자가 화면을 이동하거나 등록하려 할 때 render가 돌려주는 값."""
 
-    kind: str  # EVENT_NAVIGATE | EVENT_LOGOUT | EVENT_SUBMIT
+    kind: str  # EVENT_NAVIGATE | EVENT_LOGOUT | EVENT_SUBMIT | EVENT_UPDATE
     target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_LIST | TARGET_REVIEW_ASSIGN
     draft: CaseDraft | None = None  # EVENT_SUBMIT일 때
 
@@ -242,15 +275,17 @@ def _dicom_age(age: object, birth_date: object, study_date: date | None) -> int 
     return years if years >= 0 else None
 
 
-def check_same_patient(files: tuple[DicomFile, ...]) -> tuple[DicomFile, ...]:
-    """먼저 확인된 영상과 환자번호가 다른 영상을 "환자 불일치"로 표시합니다(나머지는 그대로)."""
-    reference = None
+def check_same_patient(files: tuple[DicomFile, ...], reference_id: str | None = None) -> tuple[DicomFile, ...]:
+    """기준 환자와 환자번호가 다른 영상을 "환자 불일치"로 표시합니다(나머지는 그대로).
+
+    기준 환자: reference_id(수정 화면이면 기존 검사의 환자번호)가 있으면 그 번호, 없으면 먼저 확인된 영상.
+    """
     checked = []
     for item in files:
         if item.status in (FILE_OK, FILE_MISMATCH):
-            if reference is None:
-                reference = item
-            item = _with_status(item, FILE_OK if item.patient_id == reference.patient_id else FILE_MISMATCH)
+            if reference_id is None:
+                reference_id = item.patient_id
+            item = _with_status(item, FILE_OK if item.patient_id == reference_id else FILE_MISMATCH)
         checked.append(item)
     return tuple(checked)
 
@@ -261,8 +296,15 @@ def _with_status(item: DicomFile, status: str) -> DicomFile:
 
 # ── 화면 상태 계산 ───────────────────────────────────────────────────────────
 
-def summarize(user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str) -> FormSummary:
-    """불러온 파일과 검사명으로 위 칸에 채울 영상, 검사 등록 버튼 상태, 상태 배지를 정합니다."""
+def summarize(
+    user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str, edit: EditTarget | None = None,
+) -> FormSummary:
+    """불러온 파일과 검사명으로 위 칸에 채울 영상, 검사 등록 버튼 상태, 상태 배지를 정합니다.
+
+    edit가 있으면 수정 화면 기준으로 판단합니다(_summarize_edit).
+    """
+    if edit is not None:
+        return _summarize_edit(user, files, exam_name, edit)
     ok_files = [item for item in files if item.status == FILE_OK]
     patient = ok_files[0] if ok_files else None
     problem_count = len(files) - len(ok_files)
@@ -292,12 +334,79 @@ def summarize(user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str) -
     return FormSummary(patient, len(ok_files), problem_count, reason is None, reason, badge)
 
 
+def _edit_patient(edit: EditTarget) -> DicomFile:
+    """수정 화면 위 칸에 채울 환자·검사 정보(기존 검사 값)."""
+    return DicomFile(
+        file_id=0, file_name="", data=b"", status=FILE_SAVED, modality=edit.modality, study_date=edit.exam_date,
+        patient_name=edit.patient_name, patient_id=edit.patient_id, patient_sex=edit.patient_sex,
+        patient_age=edit.patient_age,
+    )
+
+
+def _saved_ids(files: tuple[DicomFile, ...]) -> set[str]:
+    return {item.saved_file_id for item in files if item.status == FILE_SAVED}
+
+
+def _summarize_edit(user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str, edit: EditTarget) -> FormSummary:
+    """수정 화면: 환자 정보는 기존 검사 값을 쓰고, 검사명이나 영상이 바뀌었을 때만 수정 저장을 허용합니다.
+
+    기존 검사에 영상이 없어도(아직 업로드 기능 전) 검사명만 고쳐 저장할 수 있습니다.
+    """
+    usable = [item for item in files if item.status in (FILE_OK, FILE_SAVED)]
+    problem_count = len(files) - len(usable)
+    changed = (
+        exam_name.strip() != edit.exam_name.strip()
+        or _saved_ids(files) != _saved_ids(edit.files)
+        or any(item.status == FILE_OK for item in files)
+    )
+    if not is_registrar(user):
+        reason = MSG_NEED_REGISTRAR
+    elif problem_count:
+        reason = MSG_FILES_TO_CHECK
+    elif not exam_name.strip():
+        reason = MSG_NEED_EXAM_NAME
+    elif not changed:
+        reason = MSG_NO_CHANGES
+    else:
+        reason = None
+
+    if problem_count:
+        badge = BADGE_CHECK
+    elif reason is None:
+        badge = BADGE_EDIT_READY
+    else:
+        badge = BADGE_EDIT
+    return FormSummary(_edit_patient(edit), len(usable), problem_count, reason is None, reason, badge)
+
+
 def is_registrar(user: CurrentUser) -> bool:
     return user.role == ROLE_REGISTRAR
 
 
-def build_draft(user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str) -> CaseDraft:
-    """확인된 영상·검사명과 로그인 사용자로 등록할 내용을 만듭니다(summarize의 can_submit이 True일 때 호출)."""
+def build_draft(
+    user: CurrentUser, files: tuple[DicomFile, ...], exam_name: str, edit: EditTarget | None = None,
+) -> CaseDraft:
+    """확인된 영상·검사명과 로그인 사용자로 등록할 내용을 만듭니다(summarize의 can_submit이 True일 때 호출).
+
+    edit가 있으면 수정할 내용: 환자·장비·진료과는 기존 검사 값, files는 남겨 둔 기존 영상 + 새 영상,
+    removed_file_ids는 화면에서 뺀 기존 영상입니다.
+    """
+    if edit is not None:
+        kept = tuple(item for item in files if item.status in (FILE_OK, FILE_SAVED))
+        return CaseDraft(
+            patient_name=edit.patient_name,
+            patient_id=edit.patient_id,
+            patient_sex=edit.patient_sex,
+            patient_age=edit.patient_age,
+            exam_name=exam_name.strip(),
+            modality=edit.modality,
+            exam_date=edit.exam_date,
+            files=kept,
+            department_id=edit.department_id,
+            created_by=user.uid,
+            case_id=edit.case_id,
+            removed_file_ids=tuple(sorted(_saved_ids(edit.files) - _saved_ids(kept))),
+        )
     ok_files = tuple(item for item in files if item.status == FILE_OK)
     patient = ok_files[0]
     return CaseDraft(
@@ -325,6 +434,99 @@ def reset_state() -> None:
 
 def _files() -> tuple[DicomFile, ...]:
     return st.session_state.get(_FILES_KEY, ())
+
+
+def _editing() -> EditTarget | None:
+    return st.session_state.get(_EDIT_KEY)
+
+
+def _patient_reference() -> str | None:
+    """환자 일치 확인의 기준 환자번호. 수정 화면이면 기존 검사의 환자번호입니다."""
+    edit = _editing()
+    return edit.patient_id if edit else None
+
+
+# ── 검사 수정 시작 (app.py에서 호출) ─────────────────────────────────────────
+
+_SEX_FROM_BACKEND = {"M": "남", "MALE": "남", "남": "남", "남성": "남", "F": "여", "FEMALE": "여", "여": "여", "여성": "여"}
+
+
+def _to_date(value: object) -> date | None:
+    """Firestore 시각·날짜 값(또는 ISO 글자)을 한국 날짜로 바꿉니다. 알 수 없으면 None입니다."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, datetime):
+        return (value.astimezone(KST) if value.tzinfo else value).date()
+    return value if isinstance(value, date) else None
+
+
+def _age_from_birth(birth_date: object) -> int | None:
+    born = _to_date(birth_date)
+    if born is None:
+        return None
+    today = datetime.now(KST).date()
+    years = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    return years if years >= 0 else None
+
+
+def edit_target_from_case(case: Mapping[str, object], files: Iterable[Mapping[str, object]] = ()) -> EditTarget:
+    """백엔드 데이터로 수정할 검사(EditTarget)를 만듭니다. 데이터베이스는 조회하지 않습니다.
+
+    - case: services.case.get_case_detail()이 돌려준 값(케이스 + "patient" + "department")
+    - files: repositories.image.list_case_files(case_id, "ORIGINAL")이 돌려준 파일 정보 목록
+    case_id가 없으면 ValueError를 냅니다.
+    """
+    case_id = _clean(case.get("case_id"))
+    if not case_id:
+        raise ValueError("수정할 검사의 case_id가 없습니다.")
+    patient = case.get("patient") or {}
+    modality = _clean(case.get("exam_type")).upper()
+    exam_date = _to_date(case.get("exam_at"))
+    name, patient_id = _clean(patient.get("name")), _clean(case.get("patient_id"))
+    sex = _SEX_FROM_BACKEND.get(_clean(patient.get("sex")).upper(), "")
+    age = _age_from_birth(patient.get("birth_date"))
+    saved = tuple(
+        DicomFile(
+            file_id=index,
+            file_name=_clean(info.get("original_name")) or _clean(info.get("file_id")),
+            data=b"",
+            status=FILE_SAVED,
+            modality=modality,
+            study_date=exam_date,
+            patient_name=name,
+            patient_id=patient_id,
+            patient_sex=sex,
+            patient_age=age,
+            saved_file_id=_clean(info.get("file_id")),
+        )
+        for index, info in enumerate(files, start=1)
+    )
+    return EditTarget(
+        case_id=case_id, patient_name=name, patient_id=patient_id, patient_sex=sex, patient_age=age,
+        exam_name=_clean(case.get("exam_info")), modality=modality, exam_date=exam_date,
+        department_id=_clean(case.get("department_id")), files=saved,
+    )
+
+
+def start_edit(target: EditTarget) -> None:
+    """검사 등록 화면을 수정 화면으로 준비합니다(기존 값 채우기). 다음 render()부터 수정 화면이 그려집니다.
+
+    작성 중이던 새 검사 내용은 지웁니다. 수정을 마치거나 취소하면 reset_state()로 새 검사 등록 화면으로 돌아갑니다.
+    """
+    reset_state()
+    state = st.session_state
+    state[_EDIT_KEY] = target
+    state[_FILES_KEY] = target.files
+    state[_NEXT_FILE_ID_KEY] = len(target.files) + 1
+    state[_form_key("exam_name")] = target.exam_name  # 검사명 입력칸에 기존 검사명을 미리 넣어 둠
+
+
+def is_editing() -> bool:
+    """지금 검사 등록 화면이 수정 화면인지 알려 줍니다."""
+    return _editing() is not None
 
 
 # ── 아이콘 (Figma에서 받은 SVG) ──────────────────────────────────────────────
@@ -751,6 +953,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 [class*="st-key-pacs_reg_cstatus_ok_"] { background:#edf3fc; color:#3266c3; }
 [class*="st-key-pacs_reg_cstatus_bad_"] { background:#fdeeee; color:#c43c3c; }
 [class*="st-key-pacs_reg_cstatus_wait_"] { background:#f4f6f9; color:#626c79; }
+[class*="st-key-pacs_reg_cstatus_saved_"] { background:#f2f2f2; color:#444; }  /* 수정 화면: 이미 저장된 영상 */
 /* 줄 오른쪽 끝 삭제(×) 버튼: 28×28 */
 [class*="st-key-pacs_reg_remove_"] {
   position:absolute !important; right:calc(16 * var(--u)); top:calc(12 * var(--u));
@@ -856,14 +1059,14 @@ def _on_upload() -> None:
         file_id = state.get(_NEXT_FILE_ID_KEY, 1)
         state[_NEXT_FILE_ID_KEY] = file_id + 1
         current.append(read_dicom(uploaded.name, data, file_id))
-    state[_FILES_KEY] = check_same_patient(tuple(current))
+    state[_FILES_KEY] = check_same_patient(tuple(current), _patient_reference())
     state[_UPLOAD_VERSION_KEY] = state.get(_UPLOAD_VERSION_KEY, 0) + 1
     if duplicates:
         state[_NOTICE_KEY] = MSG_DUPLICATE_FILE.format(names=", ".join(duplicates))
 
 
 def _remove_file(file_id: int) -> None:
-    st.session_state[_FILES_KEY] = check_same_patient(tuple(f for f in _files() if f.file_id != file_id))
+    st.session_state[_FILES_KEY] = check_same_patient(tuple(f for f in _files() if f.file_id != file_id), _patient_reference())
 
 
 def _on_cancel() -> None:
@@ -877,9 +1080,10 @@ def _on_submit(exam_key: str) -> None:
     exam_name = str(st.session_state.get(exam_key) or "")
     # 버튼이 눌린 시점의 값으로 한 번 더 확인합니다(화면 표시 후 값이 바뀌었을 수 있음).
     user = st.session_state.get(_SUBMIT_USER_KEY)
-    if user is None or not summarize(user, files, exam_name).can_submit:
+    edit = _editing()
+    if user is None or not summarize(user, files, exam_name, edit).can_submit:
         return
-    _emit(EVENT_SUBMIT, draft=build_draft(user, files, exam_name))
+    _emit(EVENT_UPDATE if edit else EVENT_SUBMIT, draft=build_draft(user, files, exam_name, edit))
 
 
 # ── 화면 그리기 ──────────────────────────────────────────────────────────────
@@ -928,10 +1132,10 @@ def _render_clock() -> None:
     _text("pacs_reg_clock", f"{datetime.now(KST):%Y. %m. %d. %H:%M:%S}")
 
 
-def _render_header(user: CurrentUser) -> None:
+def _render_header(user: CurrentUser, editing: bool = False) -> None:
     with st.container(key="pacs_reg_header"):
         _text("pacs_reg_crumb_home", "워크스페이스")
-        _text("pacs_reg_crumb_page", "검사 등록")
+        _text("pacs_reg_crumb_page", "검사 수정" if editing else "검사 등록")
         with st.container(key="pacs_reg_user"):
             _text("pacs_reg_user_role", role_label(user))
             _text("pacs_reg_user_name", user.name or USER_NAME_FALLBACK)
@@ -940,12 +1144,18 @@ def _render_header(user: CurrentUser) -> None:
             st.button("로그아웃", key="pacs_reg_logout_button", on_click=_emit, args=(EVENT_LOGOUT,))
 
 
-def _render_title(summary: FormSummary) -> None:
+def _render_title(summary: FormSummary, editing: bool = False) -> None:
     with st.container(key="pacs_reg_title"):
         with st.container(key="pacs_reg_title_text"):
-            st.title("검사 등록", anchor=False)
-        _text("pacs_reg_subtitle", "환자 정보를 확인하고 DICOM 영상을 등록하세요.")
-    badge_kind = {BADGE_NEW: "new", BADGE_DRAFT: "draft", BADGE_CHECK: "check", BADGE_READY: "ready"}[summary.badge]
+            st.title("검사 수정" if editing else "검사 등록", anchor=False)
+        _text(
+            "pacs_reg_subtitle",
+            "등록된 검사 정보를 확인하고 수정하세요." if editing else "환자 정보를 확인하고 DICOM 영상을 등록하세요.",
+        )
+    badge_kind = {
+        BADGE_NEW: "new", BADGE_DRAFT: "draft", BADGE_CHECK: "check", BADGE_READY: "ready",
+        BADGE_EDIT: "draft", BADGE_EDIT_READY: "ready",
+    }[summary.badge]
     with st.container(key=f"pacs_reg_badge_{badge_kind}"):
         st.markdown(_md(summary.badge), text_alignment="center")
 
@@ -957,7 +1167,7 @@ def _render_value_field(name: str, label: str, value: str, placeholder: str) -> 
         _text(f"pacs_reg_value_{'set' if value else 'empty'}_{name}", value or placeholder)
 
 
-def _render_info(user: CurrentUser, patient: DicomFile | None) -> str:
+def _render_info(user: CurrentUser, patient: DicomFile | None, editing: bool = False) -> str:
     """환자 및 검사 정보 카드를 그리고, 검사명 입력칸의 key를 돌려줍니다."""
     exam_key = _form_key("exam_name")
     with st.container(key="pacs_reg_info"):
@@ -982,6 +1192,8 @@ def _render_info(user: CurrentUser, patient: DicomFile | None) -> str:
         _render_value_field("modality", "검사 장비 *", patient.modality if patient else "", auto)
         _text(
             "pacs_reg_help",
+            "등록된 검사의 환자 정보입니다. 검사명을 고치거나 같은 환자의 영상을 추가·삭제할 수 있습니다."
+            if editing else
             "DICOM을 불러오면 환자 정보와 검사 장비가 자동으로 채워집니다. 등록 전 환자번호를 확인해 주세요.",
         )
     return exam_key
@@ -990,6 +1202,8 @@ def _render_info(user: CurrentUser, patient: DicomFile | None) -> str:
 def _status_kind(status: str) -> str:
     if status == FILE_OK:
         return "ok"
+    if status == FILE_SAVED:
+        return "saved"
     if status == FILE_PENDING:
         return "wait"
     return "bad"
@@ -1053,13 +1267,13 @@ def _render_dicom(user: CurrentUser, files: tuple[DicomFile, ...]) -> None:
                 _render_file_row(item, can_edit)
 
 
-def _render_footer(user: CurrentUser, summary: FormSummary, exam_key: str) -> None:
+def _render_footer(user: CurrentUser, summary: FormSummary, exam_key: str, editing: bool = False) -> None:
     st.session_state[_SUBMIT_USER_KEY] = user
     with st.container(key="pacs_reg_cancel"):
         st.button("취소", key="pacs_reg_cancel_button", width="stretch", on_click=_on_cancel)
     with st.container(key="pacs_reg_submit"):
         st.button(
-            "검사 등록",
+            "수정 저장" if editing else "검사 등록",
             key="pacs_reg_submit_button",
             width="stretch",
             disabled=not summary.can_submit,
@@ -1079,16 +1293,18 @@ def render(user: CurrentUser) -> RegisterEvent | None:
 
     files = _files()
     exam_name = str(st.session_state.get(_form_key("exam_name")) or "")
-    summary = summarize(user, files, exam_name)
+    edit = _editing()
+    editing = edit is not None
+    summary = summarize(user, files, exam_name, edit)
 
     with st.container(key="pacs_reg_stage"):
         _render_sidebar()
-        _render_header(user)
+        _render_header(user, editing)
         with st.container(key="pacs_reg_main"):
-            _render_title(summary)
-            exam_key = _render_info(user, summary.patient)
+            _render_title(summary, editing)
+            exam_key = _render_info(user, summary.patient, editing)
             _render_dicom(user, files)
-            _render_footer(user, summary, exam_key)
+            _render_footer(user, summary, exam_key, editing)
 
     return st.session_state.pop(_EVENT_KEY, None)
 
@@ -1111,9 +1327,10 @@ if __name__ == "__main__":
         reset_state()
         st.session_state[_NOTICE_KEY] = "입력한 내용을 지웠습니다. 로그인 화면 이동은 app.py 연결 후 동작합니다."
         st.rerun()
-    elif event is not None and event.kind == EVENT_SUBMIT and event.draft is not None:
+    elif event is not None and event.kind in (EVENT_SUBMIT, EVENT_UPDATE) and event.draft is not None:
         draft = event.draft
-        st.toast(f"등록할 내용: {draft.patient_name} · {draft.exam_name} · 영상 {len(draft.files)}개 (저장은 아직 연결 전)")
+        action = "수정할" if event.kind == EVENT_UPDATE else "등록할"
+        st.toast(f"{action} 내용: {draft.patient_name} · {draft.exam_name} · 영상 {len(draft.files)}개 (저장은 아직 연결 전)")
     elif event is not None:
         targets = {TARGET_CASE_LIST: "검사 목록", TARGET_REVIEW_ASSIGN: "검토 배정"}
         st.toast(f"{targets.get(event.target or '', '해당')} 화면 이동은 app.py 연결 후 동작합니다.")
