@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import streamlit as st
 
-from src.auth.session import save_session
+from src.auth.session import save_session, logout
 
 
 @dataclass(frozen=True)
@@ -493,9 +493,7 @@ if __name__ == "__main__":
         st.success("로그인과 사용자 권한 확인이 완료되었습니다.")
         st.write(f"확인된 역할: {role_names[account.role]}")
         if st.button("다시 로그인"):
-            del st.session_state[_PREVIEW_ACCOUNT_KEY]
-            if not st.session_state.get(_REMEMBER_EMAIL_KEY, False):
-                st.session_state.pop(_EMAIL_KEY, None)
+            logout()
             st.rerun()
     else:
         account = render(authenticate=authenticate_with_backend)
