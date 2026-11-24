@@ -47,11 +47,16 @@ class ProcessingPreview:
     pixels: np.ndarray
 
 
-def _require_processing(uid: str, case_id: str) -> None:
+def _get_case(case_id: str) -> Case:
     case = cases.get_case(case_id)
     if case is None:
         raise NotFoundError("해당 검사를 찾을 수 없어요.")
-    access_policy.require_case_processing(uid, cast(Case, case), cases.get_case_assignment(case_id))
+    return cast(Case, case)
+
+
+def _require_processing(uid: str, case_id: str) -> None:
+    case = _get_case(case_id)
+    access_policy.require_case_processing(uid, case, cases.get_case_assignment(case_id))
     if case["status"] != "검토 중":
         raise ConflictError("검토 중인 검사에서만 영상처리를 할 수 있어요.")
 
@@ -156,3 +161,35 @@ def save_processing_preview(
             raise
         return saved
     return result
+
+
+def _require_read(uid: str, case_id: str) -> None:
+    case = _get_case(case_id)
+    access_policy.require_case_access(uid, case, cases.get_case_assignment(case_id))
+
+
+def list_image_processing_history(uid: str, case_id: str, input_file_id: str) -> list[ProcessingResult]:
+    """List results only for the authorized case and selected original."""
+    _require_read(uid, case_id)
+    _get_original(case_id, input_file_id)
+    return records.list_processing_results(case_id, input_file_id=input_file_id)
+
+
+def open_processing_result(
+    uid: str, case_id: str, input_file_id: str, result_id: str,
+) -> ProcessingPreview:
+    """Read the saved pixels for the authorized original and processing record."""
+    _require_read(uid, case_id)
+    _get_original(case_id, input_file_id)
+    record = records.get_processing_result(case_id, result_id)
+    if record is None or record["input_file_id"] != input_file_id or record["status"] != "COMPLETED":
+        raise NotFoundError("선택한 원본 영상의 처리 결과를 찾을 수 없어요.")
+    matching = [
+        file for file in images.list_case_files(case_id, kind="RESULT")
+        if file["case_id"] == case_id and file["kind"] == "RESULT" and file["processing_result_id"] == result_id
+    ]
+    if not matching:
+        raise NotFoundError("저장된 결과 영상 파일을 찾을 수 없어요.")
+    if len(matching) != 1:
+        raise ConflictError("처리 기록에 결과 영상이 여러 개 연결되어 있어요.")
+    return ProcessingPreview(record, decode_image(file_storage.read_file(matching[0]["storage_path"])))
