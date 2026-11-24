@@ -14,7 +14,11 @@ DICOM 사용 여부는 팀에서 아직 결정하지 않았습니다. DICOM 정�
 실제 저장(케이스 생성·파일 저장)은 아직 연결하지 않았고, app.py가 EVENT_SUBMIT 이벤트를 받아 처리합니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``RegisterEvent``로 화면 이동·등록을 처리합니다.
-- ``reset_state()``: 로그아웃하거나 등록을 마친 뒤 호출. 입력한 검사명과 불러온 파일을 모두 지웁니다.
+current_user는 ``case_list.current_user_from_profile(session.get_current_user())``로 만듭니다.
+- ``reset_state()``: 등록을 마친 뒤(저장 성공 후)와 다른 화면으로 이동할 때 호출. 입력한 검사명과 불러온 파일을 모두 지웁니다.
+  취소 버튼은 화면이 직접 지웁니다. 다른 화면으로 갈 때 지우지 않으면 Streamlit이 화면에 없는 입력칸 값만 지워서
+  불러온 파일만 남은 상태가 됩니다.
+- 로그아웃(EVENT_LOGOUT)은 팀의 ``session.logout()``으로 처리합니다. 세션 값을 모두 지우므로 reset_state()는 필요 없습니다.
 단독 실행하면 샘플 등록 담당자로 미리 볼 수 있고, 주소 끝에 ``?role=REVIEWER``처럼 역할을 붙이면 그 역할로 봅니다.
 """
 
@@ -290,7 +294,10 @@ def build_draft(files: tuple[DicomFile, ...], exam_name: str) -> CaseDraft:
 
 
 def reset_state() -> None:
-    """이 화면이 세션에 저장한 값(검사명, 불러온 파일 등)을 모두 지웁니다(로그아웃·등록 완료 후 호출)."""
+    """이 화면이 세션에 저장한 값(검사명, 불러온 파일 등)을 모두 지웁니다(등록 완료 후·다른 화면으로 이동할 때 호출).
+
+    로그아웃할 때는 session.logout()이 세션 전체를 지우므로 따로 부르지 않아도 됩니다.
+    """
     for key in [k for k in st.session_state.keys() if str(k).startswith(_STATE_PREFIX)]:
         del st.session_state[key]
 

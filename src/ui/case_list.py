@@ -10,9 +10,14 @@ app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEv
 "불러오지 못했습니다" 문구가 표시됩니다.
 
 app.py에서 함께 쓰는 함수:
-- ``current_user_from_profile(profile)``: 로그인으로 확인된 사용자 정보(dict)를 ``render``에 넘길 CurrentUser로 바꿉니다.
-- ``reset_state()``: 로그아웃할 때 호출. 이 화면이 세션에 저장한 검색 조건·선택·목록을 모두 지웁니다.
+- ``current_user_from_profile(profile)``: ``session.get_current_user()``가 돌려준 사용자 정보(dict)를 ``render``에 넘길
+  CurrentUser로 바꿉니다. 화면을 그릴 때마다 session.get_current_user()로 다시 확인한 값을 넘기면
+  토큰 만료·사용자 삭제 시 로그인 화면으로 돌려보낼 수 있습니다.
 - ``refresh_exams()``: 검사 등록·수정·배정 후 호출. 다음 화면 표시 때 목록을 새로 불러옵니다.
+- ``reset_state()``: 이 화면이 세션에 저장한 검색 조건·선택·목록 캐시만 지웁니다. 이 화면만 처음 상태로 돌리고 싶을 때 씁니다.
+
+로그아웃(EVENT_LOGOUT)은 팀의 ``session.logout()``으로 처리합니다. session.logout()이 세션 값을 모두 지우므로
+(이메일 기억만 유지) 이 화면의 값도 함께 지워지고, reset_state()를 따로 부르지 않아도 됩니다.
 """
 
 from __future__ import annotations
@@ -380,7 +385,10 @@ def refresh_exams() -> None:
 
 
 def reset_state() -> None:
-    """이 화면이 세션에 저장한 값(검색 조건, 선택, 필터 칸, 목록 캐시 등)을 모두 지웁니다(로그아웃 시 호출)."""
+    """이 화면이 세션에 저장한 값(검색 조건, 선택, 필터 칸, 목록 캐시 등)만 지웁니다.
+
+    로그아웃할 때는 session.logout()이 세션 전체를 지우므로 따로 부르지 않아도 됩니다.
+    """
     for key in [k for k in st.session_state.keys() if str(k).startswith(_STATE_PREFIX)]:
         del st.session_state[key]
 
