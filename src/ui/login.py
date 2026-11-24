@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import streamlit as st
 
-from src.auth.session import save_session, logout
+from src.auth.session import save_session, logout, init_session
 
 
 @dataclass(frozen=True)
@@ -482,6 +482,7 @@ def render(authenticate: Authenticate | None = None) -> LoginResult | None:
 if __name__ == "__main__":
     # 단독 실행 시에만 성공 결과를 보여줍니다. app.py에서는 render의 반환값을 사용합니다.
     st.set_page_config(page_title="PACS 로그인", layout="wide")
+    init_session()
     if _PREVIEW_ACCOUNT_KEY in st.session_state:
         st.session_state.pop(_PASSWORD_KEY, None)
         account = st.session_state[_PREVIEW_ACCOUNT_KEY]
