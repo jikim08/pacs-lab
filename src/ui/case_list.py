@@ -111,7 +111,7 @@ class CurrentUser:
     uid: str
     role: str  # ROLE_REGISTRAR | ROLE_REVIEWER | ROLE_ADMIN (대문자, 로그인 화면에서 확인된 값)
     name: str  # 비어 있으면 화면에 USER_NAME_FALLBACK을 표시합니다.
-    department: str = ""  # 진료과 이름. 아직 백엔드가 주지 않고 화면에도 표시하지 않습니다.
+    department_id: str = ""  # 소속 진료과 ID(users 문서의 department_id). 화면에는 표시하지 않고 검사 등록 저장에 씁니다.
 
 
 @dataclass(frozen=True)
@@ -162,12 +162,12 @@ def _clean(value: object) -> str:
 def current_user_from_profile(profile: Mapping[str, object]) -> CurrentUser:
     """로그인으로 확인된 사용자 정보(dict)를 이 화면의 CurrentUser로 바꿉니다(app.py에서 호출).
 
+    profile에는 session.get_current_user()가 돌려준 사용자 정보(models.py의 User 형식)를 넣습니다.
     받은 값만 정리하고 데이터베이스는 조회하지 않습니다.
     - uid, role: 꼭 필요합니다. 비어 있으면 ValueError를 내므로, app.py는 로그인 화면으로 돌려보내면 됩니다.
     - role: 앞뒤 공백을 지우고 대문자로 맞춥니다.
     - name: 없으면 빈 칸으로 두고, 화면에는 USER_NAME_FALLBACK을 표시합니다.
-    - department: 진료과 이름(department_name 또는 department 키). department_id(예: "dept001")는
-      화면에 보여줄 이름이 아니라서 쓰지 않습니다.
+    - department_id: 소속 진료과 ID. 없으면(None 포함) 빈 칸입니다.
     """
     uid = _clean(profile.get("uid"))
     role = _clean(profile.get("role")).upper()
@@ -177,7 +177,7 @@ def current_user_from_profile(profile: Mapping[str, object]) -> CurrentUser:
         uid=uid,
         role=role,
         name=_clean(profile.get("name")),
-        department=_clean(profile.get("department_name") or profile.get("department")),
+        department_id=_clean(profile.get("department_id")),
     )
 
 
@@ -188,7 +188,7 @@ def role_label(user: CurrentUser) -> str:
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
 
-_PREVIEW_USER = CurrentUser(uid="preview-registrar", role=ROLE_REGISTRAR, name="김의사", department="영상의학과")
+_PREVIEW_USER = CurrentUser(uid="preview-registrar", role=ROLE_REGISTRAR, name="김의사")
 
 
 def load_exams(user: CurrentUser) -> list[ExamRecord]:
