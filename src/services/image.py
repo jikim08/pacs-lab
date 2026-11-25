@@ -139,3 +139,17 @@ def get_image(uid: str, file_id: str) -> FileInfo:
 
     _require_case_read(uid, file_info["case_id"])
     return file_info
+
+
+# image 다운로드. FileInfo와 byte를 반환. 권한 검사는 get_image에서 한다.
+def download_image(uid: str, file_id: str) -> tuple[FileInfo, bytes]:
+    """영상 파일의 정보와 바이트를 함께 반환한다.
+
+    영상이 속한 케이스의 접근 권한을 검사한 뒤에만 저장소를 읽는다.
+    영상 없음 / 저장소에 파일 없음: NotFoundError
+    권한 없음: PermissionError (access_policy)
+    읽기 실패: StorageError
+    """
+    file_info = get_image(uid, file_id)
+    file_bytes = file_storage.read_file(file_info["storage_path"])
+    return file_info, file_bytes
