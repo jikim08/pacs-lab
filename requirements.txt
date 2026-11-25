@@ -6,3 +6,4 @@ numpy
 opencv-python-headless
 Pillow
 streamlit-cookies-controller
+pydicom>=3.0
