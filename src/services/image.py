@@ -98,3 +98,44 @@ def upload_original_image(
         raise
 
     return file_info
+
+def _require_case_read(uid: str, case_id: str) -> Case:
+    """사용자의 조회 권한을 검사하고 케이스를 조회한다.
+
+    현재는 로그인 여부만 검사한다 (케이스별 권한은 require_case_access 구현 후 연결).
+    """
+    # TODO: require_case_access 구현 후 아래로 교체 (케이스별 ASSIGNED/READ_ONLY 권한 검사)
+    #   case = _get_case(case_id)
+    #   access_policy.require_case_access(uid, case, cases.get_case_assignment(case["case_id"]))
+    access_policy.require_case_read(uid)
+    return _get_case(case_id)
+
+
+def list_images(
+    uid: str,
+    case_id: str,
+    kind: str | None = None,
+) -> list[FileInfo]:
+    """케이스의 영상 목록을 조회한다.
+
+    kind: None(전체), ORIGINAL(원본), RESULT(처리 결과)
+    권한 없음: PermissionError (access_policy)
+    케이스 없음: NotFoundError
+    """
+    case = _require_case_read(uid, case_id)
+    return images.list_case_files(case["case_id"], kind)
+
+
+def get_image(uid: str, file_id: str) -> FileInfo:
+    """영상 1건의 정보를 조회한다.
+
+    영상이 속한 케이스의 접근 권한을 검사한다.
+    영상 없음: NotFoundError
+    권한 없음: PermissionError (access_policy)
+    """
+    file_info = images.get_file_info(file_id)
+    if file_info is None:
+        raise NotFoundError("존재하지 않는 영상입니다.")
+
+    _require_case_read(uid, file_info["case_id"])
+    return file_info
