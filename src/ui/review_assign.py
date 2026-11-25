@@ -7,12 +7,21 @@
 화면 구성:
 - 상태 카드 5개(전체 / 미배정 / 배정 완료 / 검토 중 / 검토 완료): 검사 목록 화면과 같은 기준입니다.
 - 환자 검색 + 등록일 기간 달력 + 검색 버튼: 검사 목록 화면과 같은 동작입니다(검색 버튼을 눌러야 적용).
-- 검사 표: "미배정" 탭과 "배정 완료" 탭. 줄을 누르면 왼쪽 체크박스가 켜지고(여러 개 선택 가능),
-  "배정" 버튼으로 선택한 검사를 배정합니다(배정 완료 탭에서는 재배정). 배정 창은 다음 단계에서 추가합니다.
-- 검토자 업무 현황: 검토 담당자마다 "남은 검토(배정 완료 + 검토 중) / 지금까지 배정된 전체" 건수와 막대.
+- 검사 표: "미배정" 탭과 "배정 완료" 탭. 줄을 누르면 왼쪽 체크박스가 켜집니다(한 번에 한 건만, 다른 줄을 누르면
+  기존 체크는 풀림). "배정" 버튼을 누르면 화면 가운데 배정 창이 뜹니다(배정 완료 탭에서는 재배정 창).
+- 배정 창: 선택한 검사, (재배정이면) 기존 검토자, 검토자 선택(현재 업무량 표시), 배정 메모(선택)를 보여주고
+  "배정하기"를 누르면 저장합니다. 결과는 완료 안내 또는 실패 안내 창으로 보여줍니다.
+  재배정 창의 검토자 보기에는 기존 검토자에 "현재 담당" 표시가 붙고, 그를 다시 고르면 저장하지 않고
+  "재배정이 실패하였습니다" 안내를 띄웁니다.
+- 검토자 업무 현황: 검토 담당자마다 "남은 검토(배정 완료 + 검토 중) / 지금까지 배정된 전체" 건수와,
+  그 비율만큼 채운 검은 막대.
 - 배정 이력(오른쪽 위 버튼): 화면 가운데 창에 케이스 배정·재배정 기록을 최신순으로 보여줍니다(스크롤).
 
-권한: 화면과 배정 이력은 모든 역할이 볼 수 있고, 검사 선택과 배정은 업무 담당자(ADMIN)만 할 수 있습니다.
+권한: 화면, 검토자 업무 현황, 배정 이력은 모든 역할이 볼 수 있고,
+체크박스와 배정 버튼은 업무 담당자(ADMIN)에게만 보입니다.
+
+저장: ``save_assignment(user, request)``가 배정 문서(case_assignees)를 바꾸고 변경 이력(case_history)을 남깁니다.
+팀의 배정 서비스 함수가 생기면 이 함수 안을 그 함수 호출로 바꾸면 됩니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ReviewAssignEvent``로 화면 이동(왼쪽 메뉴, 로그아웃)을
 처리합니다. 로그아웃은 화면 가운데 확인창을 거친 뒤에 EVENT_LOGOUT을 보냅니다.
@@ -22,7 +31,7 @@ app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ReviewAssi
 
 백엔드 연결(아직 구현 전인 함수는 화면이 빈 상태로 안내합니다):
 - 검사 목록: case_list.load_exams (services.case.get_case_list + 배정 조회 get_case_assignment)
-- 검토 담당자: repositories.user.list_reviewers(department_id)
+- 검토 담당자: repositories.user.list_reviewers() — 진료과 구분 없이 전체 검토 담당자
 - 배정 이력: repositories.review.list_case_history(case_id) 중 kind가 ASSIGNMENT_CHANGED인 기록
 """
 
@@ -30,12 +39,14 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import streamlit as st
 
+from src.exception import AppError
 from src.ui import case_list as _list
 from src.ui.case_list import (
     CALENDAR_PRESETS,
@@ -65,7 +76,8 @@ TAB_UNASSIGNED = "unassigned"
 TAB_ASSIGNED = "assigned"
 TAB_STATUS = {TAB_UNASSIGNED: STATUS_UNASSIGNED, TAB_ASSIGNED: STATUS_ASSIGNED}
 
-# 검토자 업무 현황의 "남은 검토": 배정됐지만 아직 검토 완료가 아닌 검사
+# 검토자 업무 현황의 "남은 검토": 배정됐지만 아직 검토 완료가 아닌 검사(배정 완료 + 검토 중).
+# 업무 현황은 "남은 검토 / 그 검토자에게 배정된 전체(검토 완료 포함)"로 보여줍니다.
 PENDING_STATUSES = frozenset({STATUS_ASSIGNED, STATUS_REVIEWING})
 
 # 업무 변경 이력(models.py의 CaseHistory.kind) 중 담당자 배정·변경 기록
@@ -88,8 +100,27 @@ MSG_NO_REVIEWERS = "표시할 검토 담당자가 없습니다."
 MSG_REVIEWERS_FAILED = "검토 담당자 목록을 불러오지 못했습니다."
 MSG_HISTORY_EMPTY = "배정 이력이 없습니다."
 MSG_HISTORY_FAILED = "배정 이력을 불러오지 못했습니다."
-MSG_ASSIGN_PENDING = "선택한 검사 {count}건: {action} 창은 다음 단계에서 연결합니다."
 UNASSIGNED_LABEL = "미배정"  # 배정 이력에서 최초 배정의 이전 담당자 자리
+
+# 배정 창(Figma "검사 배정", "검사 배정(재배정)")
+ASSIGN_TITLES = {False: "검토자 배정", True: "검토자 재배정"}
+ASSIGN_GUIDE = "선택한 검사를 담당할 검토자를 지정하세요."
+MEMO_PLACEHOLDER = "검토자에게 전달할 내용을 입력하세요."
+MAX_MEMO_CHARS = 200
+CURRENT_REVIEWER_TAG = "현재 담당"  # 재배정 창에서 기존 검토자 보기 옆 표시
+
+# 결과 안내 창(Figma "배정 완료 안내", "배정 실패 안내"): 제목과 (안내, 보조 문구)
+DONE_TITLES = {False: "배정이 완료되었습니다.", True: "재배정이 완료되었습니다."}
+DONE_LINES = {
+    False: ("선택한 검사를 담당 검토자에게 배정했습니다.", "배정 이력에서 처리 내역을 확인할 수 있습니다."),
+    True: ("선택한 검사의 담당 검토자를 변경했습니다.", "배정 이력에서 처리 내역을 확인할 수 있습니다."),
+}
+FAIL_TITLES = {False: "배정이 실패하였습니다.", True: "재배정이 실패하였습니다."}
+FAIL_SAME_REVIEWER = ("이미 배정된 담당 검토자입니다.", "검토자를 다시 확인해주세요.")
+FAIL_CASE_CHANGED = ("검사 상태가 바뀌었습니다.", "목록을 새로 불러왔습니다. 다시 확인해주세요.")
+FAIL_NOT_ADMIN = (MSG_NEED_ADMIN, "로그인한 사용자의 역할을 확인해주세요.")
+FAIL_NOT_READY = ("배정 저장 기능이 아직 준비되지 않았습니다.", "백엔드 연결 후 다시 시도해주세요.")
+FAIL_SAVE = ("배정을 저장하지 못했습니다.", "잠시 후 다시 시도해주세요.")
 
 # 로그아웃 확인창 문구(검사 목록 화면과 같음)
 LOGOUT_TEXTS = _list.CONFIRM_TEXTS["logout"]
@@ -98,7 +129,7 @@ LOGOUT_TEXTS = _list.CONFIRM_TEXTS["logout"]
 
 _STATE_PREFIX = "_pacs_asg_"
 _TAB_KEY = "_pacs_asg_tab"
-_CHECKED_KEY = "_pacs_asg_checked"  # 선택(체크)한 case_id 튜플
+_SELECTED_KEY = "_pacs_asg_selected"  # 체크한 검사의 case_id(한 건)
 _QUERY_KEY = "_pacs_asg_query"  # 환자 검색 입력칸
 _DATES_KEY = "_pacs_asg_dates"  # 등록일 칸에 들어 있는 기간(검색 전)
 _APPLIED_KEY = "_pacs_asg_applied"  # 검색 버튼으로 적용한 조건(AssignFilter)
@@ -106,7 +137,10 @@ _USER_KEY = "_pacs_asg_user"  # 화면을 그린 사용자(배정 버튼 콜백�
 _REVIEWERS_CACHE_KEY = "_pacs_asg_reviewers_cache"
 _HISTORY_OPEN_KEY = "_pacs_asg_history_open"
 _HISTORY_CACHE_KEY = "_pacs_asg_history_cache"  # 배정 이력 창을 연 동안만 보관
-_ASSIGN_KEY = "_pacs_asg_assign"  # 배정 버튼으로 요청한 배정(AssignRequest). 배정 창이 이 값을 씁니다(다음 단계)
+_DIALOG_KEY = "_pacs_asg_dialog"  # 열려 있는 배정 창(AssignTarget)
+_PICK_KEY = "_pacs_asg_pick"  # 배정 창에서 고른 검토자 UID
+_MEMO_KEY = "_pacs_asg_memo"  # 배정 창의 메모 입력칸
+_RESULT_KEY = "_pacs_asg_result"  # 배정 결과 안내 창(AssignResult)
 _CONFIRM_KEY = "_pacs_asg_confirm"  # 로그아웃 확인창 열림
 _EVENT_KEY = "_pacs_asg_event"
 _NOTICE_KEY = "_pacs_asg_notice"
@@ -159,11 +193,31 @@ class AssignFilter:
 
 
 @dataclass(frozen=True)
-class AssignRequest:
-    """배정 버튼으로 요청한 배정. 배정 완료 탭이면 재배정입니다."""
+class AssignTarget:
+    """배정 창을 연 검사. 배정 완료 탭에서 열었으면 재배정입니다."""
 
-    case_ids: tuple[str, ...]
+    case_id: str
     reassign: bool
+
+
+@dataclass(frozen=True)
+class AssignRequest:
+    """배정하기 버튼으로 저장할 내용."""
+
+    case_id: str
+    reviewer_uid: str  # 새 담당 검토자
+    previous_uid: str  # 기존 담당 검토자(신규 배정이면 "")
+    memo: str  # 배정 메모(선택, 없으면 "")
+    reassign: bool
+
+
+@dataclass(frozen=True)
+class AssignResult:
+    """결과 안내 창에 보여줄 내용."""
+
+    ok: bool
+    reassign: bool
+    lines: tuple[str, str]  # (안내, 보조 문구)
 
 
 @dataclass(frozen=True)
@@ -181,11 +235,14 @@ def _clean(value: object) -> str:
 
 
 def load_reviewers(user: CurrentUser) -> list[Reviewer]:
-    """배정할 수 있는 검토 담당자를 불러옵니다(로그인 사용자의 진료과가 있으면 그 진료과만, 이름순)."""
+    """배정할 수 있는 검토 담당자를 진료과 구분 없이 모두 불러옵니다(이름순).
+
+    진료과별로 나누기로 정하면 list_reviewers(user.department_id)처럼 진료과를 넘기면 됩니다.
+    """
     from src.repositories.user import list_reviewers
 
     reviewers = []
-    for row in list_reviewers(user.department_id or None):
+    for row in list_reviewers(None):
         uid = _clean(row.get("uid"))
         if uid:
             reviewers.append(Reviewer(uid=uid, name=_clean(row.get("name")) or uid))
@@ -269,6 +326,30 @@ def split_by_tab(exams: Iterable[ExamRecord]) -> dict[str, list[ExamRecord]]:
 
 def can_assign(user: CurrentUser) -> bool:
     return user.role == ROLE_ADMIN
+
+
+def save_assignment(user: CurrentUser, request: AssignRequest) -> None:
+    """담당자 배정을 저장합니다: 배정 권한 확인 → 현재 담당자 문서 교체 → 변경 이력 추가. 실패하면 예외를 냅니다.
+
+    배정 메모는 팀 모델에 저장할 자리가 아직 없어 변경 이력 문서에 memo로 함께 넣습니다(팀 확정 필요).
+    """
+    from src.repositories.case import save_case_assignment
+    from src.repositories.review import save_case_history
+    from src.services.access_policy import require_case_assignment
+
+    require_case_assignment(user.uid)
+    now = datetime.now(timezone.utc)
+    save_case_assignment({
+        "case_id": request.case_id, "user_id": request.reviewer_uid, "assigned_by": user.uid, "assigned_at": now,
+    })
+    history = {
+        "history_id": uuid.uuid4().hex, "case_id": request.case_id, "kind": HISTORY_ASSIGNMENT,
+        "before_value": request.previous_uid or None, "after_value": request.reviewer_uid,
+        "changed_by": user.uid, "created_at": now,
+    }
+    if request.memo:
+        history["memo"] = request.memo
+    save_case_history(history)
 
 
 def _get_reviewers(user: CurrentUser) -> tuple[list[Reviewer], bool]:
@@ -817,7 +898,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   position:absolute !important; left:calc(18 * var(--u)); right:calc(18 * var(--u)); top:calc(66 * var(--u)); height:calc(452 * var(--u));
   width:auto !important; display:block !important; overflow-y:auto !important; overflow-x:hidden; scrollbar-width:thin; scrollbar-color:#cfcfcf transparent;
 }
-/* 검토자 한 명: 이름(y 18) · 검토 대기 건수(y 49) · 업무량 막대(y 72, 높이 4) */
+/* 검토자 한 명: 이름(y 18) · 남은 검토 건수(y 49) · 업무량 막대(y 72, 높이 4) */
 [class*="st-key-pacs_asg_rv_item_"] { position:relative; flex:0 0 auto; height:calc(74 * var(--u)); }
 [class*="st-key-pacs_asg_rv_name_"] {
   left:0; top:calc(18 * var(--u)); max-width:100%; font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); font-weight:700; color:#333;
@@ -829,7 +910,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 [class*="st-key-pacs_asg_rv_count_"] strong { font-weight:500; color:#000; }
 [class*="st-key-pacs_asg_rv_bar_"] { position:absolute !important; left:0; right:0; top:calc(72 * var(--u)); width:auto !important; }
 .pacs-asg-bar { height:calc(4 * var(--u)); border-radius:2px; background:#eee; overflow:hidden; }
-.pacs-asg-bar > div { height:100%; border-radius:2px; background:#555; }
+.pacs-asg-bar > div { height:100%; border-radius:2px; background:#252525; }  /* 남은 검토 비율만큼 검은 막대 */
 .st-key-pacs_asg_load_empty {
   padding-top:calc(40 * var(--u)); text-align:center; white-space:normal; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
 }
@@ -888,6 +969,144 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_asg_hist_empty {
   padding-top:calc(60 * var(--u)); text-align:center; font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585;
 }
+
+/* ── 배정 창(Figma "검사 배정(재배정)"): 640 폭, 안쪽 여백 24·28, 줄 간격 20 ── */
+:is(.st-key-pacs_asg_dlg_backdrop, .st-key-pacs_asg_res_backdrop) {
+  position:fixed !important; inset:0; width:100vw !important; height:100vh !important;
+  background:rgba(37, 37, 37, 0.35); backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+}
+.st-key-pacs_asg_dlg_backdrop { z-index:40; }
+.st-key-pacs_asg_res_backdrop { z-index:50; }
+:is(.st-key-pacs_asg_dlg_backdrop, .st-key-pacs_asg_res_backdrop) * { width:100% !important; height:100% !important; }
+:is(.st-key-pacs_asg_dlg_backdrop, .st-key-pacs_asg_res_backdrop) button { opacity:0; cursor:default !important; }
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg {
+  position:fixed !important; z-index:41; left:50%; top:50%; transform:translate(-50%, -50%);
+  width:calc(640 * var(--u)) !important; max-width:calc(100vw - 32px) !important; max-height:calc(100vh - 32px); overflow-y:auto;
+  padding:calc(24 * var(--u)) calc(28 * var(--u)) !important; gap:calc(20 * var(--u)) !important; flex-wrap:nowrap !important;
+  background:#fff; border:1px solid #ddd; border-radius:calc(10 * var(--u)); box-shadow:0 calc(8 * var(--u)) calc(24 * var(--u)) rgba(0, 0, 0, 0.12);
+}
+.st-key-pacs_asg_dlg > div { width:100% !important; flex:0 0 auto !important; }
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_head { flex-wrap:nowrap !important; align-items:center !important; justify-content:space-between !important; }
+.st-key-pacs_asg_dlg_head > div { flex:0 0 auto !important; width:auto !important; }
+.st-key-pacs_asg_dlg_title { font-size:calc(20 * var(--u)); line-height:calc(30 * var(--u)); font-weight:700; color:#222; white-space:nowrap; }
+.st-key-pacs_asg_dlg_close [data-testid="stButton"] { display:flex !important; }
+.st-key-pacs_asg_dlg_close button {
+  width:calc(50 * var(--u)) !important; height:calc(40 * var(--u)) !important; min-height:0 !important; padding:0 !important;
+  background:#fff !important; border:1px solid #dadada !important; border-radius:calc(5 * var(--u)) !important; box-shadow:none !important; cursor:pointer;
+}
+.st-key-pacs_asg_dlg_close button:hover { background:#f5f5f5 !important; }
+:is(.st-key-pacs_asg_hist_close, .st-key-pacs_asg_dlg_close) button :is(p, span, div) { color:#333 !important; }
+.st-key-pacs_asg_dlg_close button p { font-size:calc(12 * var(--u)) !important; line-height:calc(18 * var(--u)) !important; font-weight:500 !important; color:#333 !important; }
+.st-key-pacs_asg_dlg_guide { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#737373; }
+/* 선택한 검사·기존 검토자 칸: 배경 #f7f7f7, 안쪽 여백 12·16, 줄 간격 8 */
+.st-key-pacs_asg_stage :is(.st-key-pacs_asg_dlg_case, .st-key-pacs_asg_dlg_prev) {
+  padding:calc(12 * var(--u)) calc(16 * var(--u)) !important; gap:calc(8 * var(--u)) !important; background:#f7f7f7;
+}
+:is(.st-key-pacs_asg_dlg_case_title, .st-key-pacs_asg_dlg_prev_title) { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:700; color:#333; }
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_caserow { flex-wrap:nowrap !important; gap:calc(24 * var(--u)) !important; }
+.st-key-pacs_asg_dlg_caserow > div { flex:0 1 auto !important; width:auto !important; min-width:0; }
+:is(.st-key-pacs_asg_dlg_case_name, .st-key-pacs_asg_dlg_case_exam, .st-key-pacs_asg_dlg_prev_name) {
+  font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#333; white-space:nowrap;
+}
+:is(.st-key-pacs_asg_dlg_case_name, .st-key-pacs_asg_dlg_prev_name) { font-weight:500; }
+/* 검토자 선택: 제목 13 Bold, 보기 사이 10. 보기가 많으면 이 부분만 스크롤 */
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_pick { gap:calc(10 * var(--u)) !important; }
+.st-key-pacs_asg_dlg_pick_title { font-size:calc(13 * var(--u)); line-height:calc(20 * var(--u)); font-weight:700; color:#333; }
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_opts {
+  gap:calc(10 * var(--u)) !important; max-height:calc(228 * var(--u)); overflow-y:auto; flex-wrap:nowrap !important;
+  scrollbar-width:thin; scrollbar-color:#cfcfcf transparent;
+}
+.st-key-pacs_asg_dlg_opts > div { flex:0 0 auto !important; }
+.st-key-pacs_asg_dlg_opts_empty { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#858585; }
+/* 검토자 보기: 높이 49, 테두리 #dbdbdb. 왼쪽 동그라미(고르면 안에 점), 이름 12 Bold, 오른쪽 업무량 12 Medium */
+[class*="st-key-pacs_asg_opt_"]:is([class*="_on_"], [class*="_off_"]) {
+  position:relative; height:calc(49 * var(--u)) !important; flex:0 0 auto !important;
+  background:#fff; border:1px solid #dbdbdb; border-radius:calc(5 * var(--u));
+}
+[class*="st-key-pacs_asg_opt_"]:is([class*="_on_"], [class*="_off_"])::before {
+  content:''; position:absolute; left:calc(14 * var(--u)); top:50%; transform:translateY(-50%); z-index:1; pointer-events:none;
+  width:calc(18 * var(--u)); height:calc(18 * var(--u)); border:1.5px solid #333; border-radius:50%; background:#fff;
+}
+[class*="st-key-pacs_asg_opt_on_"][class*="st-key-pacs_asg_opt_on_"] { border-color:#333; }
+[class*="st-key-pacs_asg_opt_on_"][class*="st-key-pacs_asg_opt_on_"]::before { background:radial-gradient(circle, #333 0 calc(4.5 * var(--u)), #fff calc(5 * var(--u))); }
+[class*="st-key-pacs_asg_opt_off_"][class*="st-key-pacs_asg_opt_off_"]:hover { background:#fafafa; }
+[class*="st-key-pacs_asg_opt_who_"], [class*="st-key-pacs_asg_opt_count_"] {
+  position:absolute !important; top:50%; transform:translateY(-50%); width:auto !important; white-space:nowrap;
+  font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#333;
+}
+/* 이름(넘치면 …) 바로 옆에 "현재 담당" 표시(재배정 창의 기존 검토자) */
+.st-key-pacs_asg_stage [class*="st-key-pacs_asg_opt_who_"] {
+  left:calc(44 * var(--u)); right:calc(100 * var(--u)); flex-wrap:nowrap !important; align-items:center !important; gap:calc(8 * var(--u)) !important;
+}
+[class*="st-key-pacs_asg_opt_who_"] > div { width:auto !important; min-width:0; flex:0 1 auto !important; }
+[class*="st-key-pacs_asg_opt_who_"] > div:has([class*="st-key-pacs_asg_opt_tag_"]) { flex:0 0 auto !important; }
+[class*="st-key-pacs_asg_opt_name_"] { font-weight:700; overflow:hidden; }
+[class*="st-key-pacs_asg_opt_name_"] p { overflow:hidden; text-overflow:ellipsis; }
+[class*="st-key-pacs_asg_opt_tag_"] {
+  padding:calc(1 * var(--u)) calc(7 * var(--u)) !important; border:1px solid #cfcfcf; border-radius:calc(9 * var(--u)); background:#f5f5f5;
+  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#555;
+}
+[class*="st-key-pacs_asg_opt_count_"] { right:calc(14 * var(--u)); font-weight:500; }
+:is([class*="st-key-pacs_asg_opt_on_"], [class*="st-key-pacs_asg_opt_off_"]) [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
+  position:absolute !important; inset:0; z-index:2; width:100% !important; height:100% !important;
+}
+:is([class*="st-key-pacs_asg_opt_on_"], [class*="st-key-pacs_asg_opt_off_"]) :is([data-testid="stButton"], button) {
+  width:100% !important; height:100% !important; min-height:0 !important;
+}
+:is([class*="st-key-pacs_asg_opt_on_"], [class*="st-key-pacs_asg_opt_off_"]) button {
+  padding:0 !important; border:0 !important; border-radius:calc(5 * var(--u)) !important; box-shadow:none !important; background:transparent !important; cursor:pointer;
+}
+:is([class*="st-key-pacs_asg_opt_on_"], [class*="st-key-pacs_asg_opt_off_"]) button p { font-size:0 !important; }
+/* 배정 메모: 라벨 11 Medium, 입력칸 테두리 #ddd, 글자 11 */
+.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_memo { gap:calc(6 * var(--u)) !important; }
+.st-key-pacs_asg_dlg_memo_label { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#666; }
+.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"] {
+  height:calc(42 * var(--u)) !important; min-height:0 !important; background:#fff !important;
+  border:1px solid #ddd !important; border-radius:calc(4 * var(--u)) !important; box-shadow:none !important;
+}
+.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"]:focus-within { border-color:#555 !important; }
+.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"] > div,
+.st-key-pacs_asg_dlg_memo [data-baseweb="base-input"] { background:transparent !important; }
+.st-key-pacs_asg_dlg_memo input {
+  height:100% !important; padding:0 calc(12 * var(--u)) !important; background:transparent !important;
+  color:#333 !important; -webkit-text-fill-color:#333; font-family:inherit !important; font-size:calc(11 * var(--u)) !important;
+}
+.st-key-pacs_asg_dlg_memo input::placeholder { color:#858585 !important; -webkit-text-fill-color:#858585; opacity:1; }
+.st-key-pacs_asg_dlg_memo [data-testid="InputInstructions"] { display:none !important; }
+/* 아래 버튼: 오른쪽 정렬, 높이 40, 사이 8 */
+.st-key-pacs_asg_stage :is(.st-key-pacs_asg_dlg_actions, .st-key-pacs_asg_res_actions) {
+  flex-wrap:nowrap !important; justify-content:flex-end !important; gap:calc(8 * var(--u)) !important;
+}
+:is(.st-key-pacs_asg_dlg_actions, .st-key-pacs_asg_res_actions) > div { flex:0 0 auto !important; width:auto !important; }
+:is(.st-key-pacs_asg_dlg_cancel, .st-key-pacs_asg_dlg_submit, .st-key-pacs_asg_res_ok) [data-testid="stButton"] { display:flex !important; }
+:is(.st-key-pacs_asg_dlg_cancel, .st-key-pacs_asg_dlg_submit) button {
+  height:calc(40 * var(--u)) !important; padding:0 calc(18 * var(--u)) !important;
+}
+:is(.st-key-pacs_asg_dlg_cancel, .st-key-pacs_asg_dlg_submit, .st-key-pacs_asg_res_ok) button {
+  width:auto !important; min-height:0 !important; border-radius:calc(5 * var(--u)) !important; box-shadow:none !important;
+  cursor:pointer; white-space:nowrap; font-size:calc(12 * var(--u)) !important; line-height:calc(18 * var(--u)) !important;
+}
+:is(.st-key-pacs_asg_dlg_cancel, .st-key-pacs_asg_dlg_submit, .st-key-pacs_asg_res_ok) button p {
+  font-size:calc(12 * var(--u)) !important; line-height:calc(18 * var(--u)) !important; font-weight:500 !important;
+}
+.st-key-pacs_asg_dlg_cancel button { background:#fff !important; border:1px solid #dadada !important; color:#333 !important; }
+.st-key-pacs_asg_dlg_cancel button:hover { background:#f5f5f5 !important; }
+:is(.st-key-pacs_asg_dlg_submit, .st-key-pacs_asg_res_ok) button { background:#242424 !important; border:1px solid #242424 !important; color:#fff !important; }
+:is(.st-key-pacs_asg_dlg_submit, .st-key-pacs_asg_res_ok) button:hover:enabled { background:#3a3a3a !important; }
+.st-key-pacs_asg_dlg_submit button:disabled { background:#cfcfcf !important; border-color:#cfcfcf !important; cursor:not-allowed; }
+
+/* ── 결과 안내 창(Figma "배정 완료 안내", "배정 실패 안내"): 400 폭, 안쪽 여백 28, 줄 간격 14 ── */
+.st-key-pacs_asg_stage :is(.st-key-pacs_asg_res_done, .st-key-pacs_asg_res_fail) {
+  position:fixed !important; z-index:51; left:50%; top:50%; transform:translate(-50%, -50%);
+  width:calc(400 * var(--u)) !important; max-width:calc(100vw - 32px) !important;
+  padding:calc(28 * var(--u)) !important; gap:calc(14 * var(--u)) !important;
+  background:#fff; border:1px solid #ddd; border-radius:calc(8 * var(--u)); box-shadow:0 calc(8 * var(--u)) calc(24 * var(--u)) rgba(0, 0, 0, 0.12);
+}
+:is(.st-key-pacs_asg_res_done, .st-key-pacs_asg_res_fail) > div { width:100% !important; }
+.st-key-pacs_asg_res_title { font-size:calc(19 * var(--u)); line-height:calc(29 * var(--u)); font-weight:700; color:#333; }
+.st-key-pacs_asg_res_message { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#666; }
+.st-key-pacs_asg_res_detail { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#737373; }
+.st-key-pacs_asg_res_ok button { height:calc(38 * var(--u)) !important; padding:0 calc(16 * var(--u)) !important; }
 
 /* 로그아웃 확인창(검사 목록 화면과 같음): 440 폭, 안쪽 여백 28, 줄 간격 20 */
 .st-key-pacs_asg_stage .st-key-pacs_asg_modal_logout {
@@ -956,36 +1175,117 @@ def _current_tab() -> str:
     return tab if tab in TAB_STATUS else TAB_UNASSIGNED
 
 
-def _checked() -> tuple[str, ...]:
-    return tuple(st.session_state.get(_CHECKED_KEY, ()))
+def _selected() -> str | None:
+    return st.session_state.get(_SELECTED_KEY)
 
 
 def _switch_tab(tab: str) -> None:
-    """탭을 바꾸면 선택을 지웁니다(다른 탭의 검사가 함께 배정되지 않게)."""
+    """탭을 바꾸면 체크를 지웁니다(다른 탭의 검사가 배정 창에 열리지 않게)."""
     if tab != _current_tab():
         st.session_state[_TAB_KEY] = tab
-        st.session_state.pop(_CHECKED_KEY, None)
+        st.session_state.pop(_SELECTED_KEY, None)
 
 
 def _toggle(case_id: str) -> None:
-    """줄을 누르면 체크를 켜고, 다시 누르면 끕니다(여러 개 선택 가능)."""
-    checked = _checked()
-    st.session_state[_CHECKED_KEY] = (
-        tuple(c for c in checked if c != case_id) if case_id in checked else (*checked, case_id)
-    )
+    """줄을 누르면 그 검사만 체크합니다(기존 체크는 풀림). 체크된 줄을 다시 누르면 풀립니다."""
+    if _selected() == case_id:
+        st.session_state.pop(_SELECTED_KEY, None)
+    else:
+        st.session_state[_SELECTED_KEY] = case_id
+
+
+def _clear_dialog() -> None:
+    for key in (_DIALOG_KEY, _PICK_KEY, _MEMO_KEY):
+        st.session_state.pop(key, None)
 
 
 def _on_assign() -> None:
-    """배정 버튼: 업무 담당자인지 다시 확인하고, 선택한 검사의 배정(배정 완료 탭이면 재배정)을 요청합니다."""
+    """배정 버튼: 업무 담당자인지 다시 확인하고, 체크한 검사의 배정 창(배정 완료 탭이면 재배정 창)을 엽니다."""
     user = st.session_state.get(_USER_KEY)
-    checked = _checked()
     if not isinstance(user, CurrentUser) or not can_assign(user):
         st.session_state[_NOTICE_KEY] = MSG_NEED_ADMIN
         return
-    if not checked:
+    case_id = _selected()
+    if not case_id:
         return
     _cal_close()
-    st.session_state[_ASSIGN_KEY] = AssignRequest(case_ids=checked, reassign=_current_tab() == TAB_ASSIGNED)
+    _clear_dialog()
+    st.session_state[_DIALOG_KEY] = AssignTarget(case_id=case_id, reassign=_current_tab() == TAB_ASSIGNED)
+
+
+def _pick_reviewer(uid: str) -> None:
+    st.session_state[_PICK_KEY] = uid
+
+
+def _close_assign() -> None:
+    """배정 창의 ×·취소·바깥: 저장하지 않고 닫습니다(체크는 그대로)."""
+    _clear_dialog()
+
+
+def _show_result(ok: bool, reassign: bool, lines: tuple[str, str]) -> None:
+    st.session_state[_RESULT_KEY] = AssignResult(ok=ok, reassign=reassign, lines=lines)
+
+
+def _close_result() -> None:
+    st.session_state.pop(_RESULT_KEY, None)
+
+
+def _on_assign_submit() -> None:
+    """배정하기: 최신 상태를 다시 확인하고 저장한 뒤, 완료·실패 안내 창을 띄웁니다.
+
+    - 재배정에서 기존 검토자를 고르면 저장하지 않고 실패 안내를 띄우고, 배정 창은 그대로 둡니다(다시 고르기).
+    - 그 사이 검사 상태가 바뀌었거나 저장에 실패하면 배정 창을 닫고 실패 안내를 띄웁니다.
+    - 성공하면 체크와 배정 창을 지우고, 목록·검토자 업무 현황을 새로 불러옵니다.
+    """
+    state = st.session_state
+    target = state.get(_DIALOG_KEY)
+    user = state.get(_USER_KEY)
+    reviewer_uid = state.get(_PICK_KEY)
+    if not isinstance(target, AssignTarget) or not isinstance(user, CurrentUser) or not reviewer_uid:
+        return
+    reassign = target.reassign
+    if not can_assign(user):
+        _clear_dialog()
+        _show_result(False, reassign, FAIL_NOT_ADMIN)
+        return
+
+    _list.refresh_exams()  # 다른 사람이 그 사이 배정했을 수 있으니 최신 목록으로 확인합니다.
+    exams, _ = _list._get_exams(user)
+    exam = next((e for e in exams if e.case_id == target.case_id), None)
+    expected = STATUS_ASSIGNED if reassign else STATUS_UNASSIGNED
+    if exam is None or exam.status != expected:
+        _clear_dialog()
+        state.pop(_SELECTED_KEY, None)
+        _show_result(False, reassign, FAIL_CASE_CHANGED)
+        return
+    previous_uid = exam.assignee_uid or ""
+    if reassign and reviewer_uid == previous_uid:
+        _show_result(False, reassign, FAIL_SAME_REVIEWER)
+        return
+
+    request = AssignRequest(
+        case_id=target.case_id, reviewer_uid=reviewer_uid, previous_uid=previous_uid,
+        memo=str(state.get(_MEMO_KEY) or "").strip()[:MAX_MEMO_CHARS], reassign=reassign,
+    )
+    try:
+        save_assignment(user, request)
+    except NotImplementedError:
+        _logger.info("배정 저장 기능(save_case_assignment 등)이 아직 구현되지 않았습니다.")
+        lines = FAIL_NOT_READY
+    except (AppError, PermissionError) as error:
+        lines = (str(error) or FAIL_SAVE[0], FAIL_SAVE[1])
+    except Exception:
+        _logger.exception("배정 저장 실패")
+        lines = FAIL_SAVE
+    else:
+        _clear_dialog()
+        state.pop(_SELECTED_KEY, None)
+        _list.refresh_exams()
+        refresh_reviewers()
+        _show_result(True, reassign, DONE_LINES[reassign])
+        return
+    _clear_dialog()
+    _show_result(False, reassign, lines)
 
 
 def _open_history() -> None:
@@ -1031,7 +1331,7 @@ def _on_search() -> None:
         start, end = end, start
     query = str(st.session_state.get(_QUERY_KEY) or "").strip()
     st.session_state[_APPLIED_KEY] = AssignFilter(query, start, end)
-    st.session_state.pop(_CHECKED_KEY, None)
+    st.session_state.pop(_SELECTED_KEY, None)
     _list.refresh_exams()  # 검색할 때는 최신 목록으로 다시 불러옵니다.
     refresh_reviewers()
 
@@ -1239,7 +1539,7 @@ def _render_filters() -> None:
 
 
 def _render_row(index: int, exam: ExamRecord, selectable: bool, checked: bool) -> None:
-    """검사 한 줄. 업무 담당자는 줄을 눌러 체크할 수 있고, 다른 역할은 보기만 합니다."""
+    """검사 한 줄. 업무 담당자는 줄을 눌러 체크(한 건만)할 수 있고, 다른 역할은 체크박스 없이 보기만 합니다."""
     kind = ("selrow" if checked else "row") if selectable else "viewrow"
     with st.container(key=f"pacs_asg_{kind}_{index}"):
         _text(f"pacs_asg_cname_{index}", exam.patient_name)
@@ -1254,7 +1554,7 @@ def _render_row(index: int, exam: ExamRecord, selectable: bool, checked: bool) -
             )
 
 
-def _render_table(user: CurrentUser, tabs: dict[str, list[ExamRecord]], tab: str, checked: tuple[str, ...], load_failed: bool) -> None:
+def _render_table(user: CurrentUser, tabs: dict[str, list[ExamRecord]], tab: str, selected: str | None, load_failed: bool) -> None:
     selectable = can_assign(user)
     rows = tabs[tab]
     with st.container(key="pacs_asg_table"):
@@ -1265,13 +1565,12 @@ def _render_table(user: CurrentUser, tabs: dict[str, list[ExamRecord]], tab: str
                         f"{TAB_STATUS[name]}  {len(tabs[name])}", key=f"pacs_asg_tabbtn_{name}",
                         on_click=_switch_tab, args=(name,),
                     )
-            with st.container(key="pacs_asg_assign"):
-                st.button(
-                    "배정", key="pacs_asg_assign_button", width="stretch",
-                    disabled=not (selectable and checked),
-                    help=None if selectable else MSG_NEED_ADMIN,
-                    on_click=_on_assign,
-                )
+            if selectable:  # 배정 버튼은 업무 담당자에게만 보입니다. 체크한 검사가 없으면 꺼집니다.
+                with st.container(key="pacs_asg_assign"):
+                    st.button(
+                        "배정", key="pacs_asg_assign_button", width="stretch",
+                        disabled=not selected, on_click=_on_assign,
+                    )
         with st.container(key="pacs_asg_thead"):
             for name, label in (("name", "환자명"), ("pid", "환자 ID"), ("exam", "검사명"), ("time", "등록 시간 ↓")):
                 _text(f"pacs_asg_th_{name}", label, align="center" if name != "name" else "left")
@@ -1281,20 +1580,20 @@ def _render_table(user: CurrentUser, tabs: dict[str, list[ExamRecord]], tab: str
                 _text("pacs_asg_empty", message, align="center")
                 return
             for index, exam in enumerate(rows):
-                _render_row(index, exam, selectable, exam.case_id in checked)
+                _render_row(index, exam, selectable, exam.case_id == selected)
 
 
 def _render_workload(loads: list[ReviewerLoad], failed: bool) -> None:
     with st.container(key="pacs_asg_load"):
         _text("pacs_asg_load_title", "검토자 업무 현황")
-        _text("pacs_asg_load_sub", "현재 배정된 검토 대기 건수입니다.")
+        _text("pacs_asg_load_sub", "남은 검토(배정 완료 + 검토 중) / 배정된 전체 검사")
         with st.container(key="pacs_asg_load_list"):
             if failed or not loads:
                 _text("pacs_asg_load_empty", MSG_REVIEWERS_FAILED if failed else MSG_NO_REVIEWERS, align="center")
             for index, load in enumerate(loads):
                 with st.container(key=f"pacs_asg_rv_item_{index}"):
                     _text(f"pacs_asg_rv_name_{index}", load.name)
-                    _text(f"pacs_asg_rv_wait_{index}", "검토 대기")
+                    _text(f"pacs_asg_rv_wait_{index}", "남은 검토")
                     with st.container(key=f"pacs_asg_rv_count_{index}"):
                         st.markdown(f"**{load.pending}** / {load.total}건")
                     with st.container(key=f"pacs_asg_rv_bar_{index}"):
@@ -1346,6 +1645,72 @@ def _render_history(entries: list[HistoryEntry], failed: bool) -> None:
                     _text(f"pacs_asg_hist_kind_{index}", "재배정" if entry.reassign else "신규 배정")
 
 
+def _reviewer_name(uid: str, loads: list[ReviewerLoad]) -> str:
+    return next((load.name for load in loads if load.uid == uid), uid) or "-"
+
+
+def _render_assign(target: AssignTarget, exam: ExamRecord, loads: list[ReviewerLoad], reviewers_failed: bool) -> None:
+    """배정 창(Figma "검사 배정", "검사 배정(재배정)"). 검토자를 하나 골라야 배정하기 버튼이 켜집니다."""
+    picked = st.session_state.get(_PICK_KEY)
+    st.button("배정 창 닫기", key="pacs_asg_dlg_backdrop", on_click=_close_assign)
+    with st.container(key="pacs_asg_dlg"):
+        with st.container(key="pacs_asg_dlg_head", horizontal=True):
+            _text("pacs_asg_dlg_title", ASSIGN_TITLES[target.reassign])
+            with st.container(key="pacs_asg_dlg_close"):
+                st.button("×", key="pacs_asg_dlg_close_button", on_click=_close_assign)
+        _text("pacs_asg_dlg_guide", ASSIGN_GUIDE)
+        with st.container(key="pacs_asg_dlg_case"):
+            _text("pacs_asg_dlg_case_title", "선택한 검사 1건")
+            with st.container(key="pacs_asg_dlg_caserow", horizontal=True):
+                _text("pacs_asg_dlg_case_name", exam.patient_name)
+                _text("pacs_asg_dlg_case_exam", exam.exam_name or "-")
+        if target.reassign:
+            with st.container(key="pacs_asg_dlg_prev"):
+                _text("pacs_asg_dlg_prev_title", "기존 검토자")
+                _text("pacs_asg_dlg_prev_name", _reviewer_name(exam.assignee_uid or "", loads))
+        with st.container(key="pacs_asg_dlg_pick"):
+            _text("pacs_asg_dlg_pick_title", "검토자 선택 *")
+            with st.container(key="pacs_asg_dlg_opts"):
+                if not loads:
+                    _text("pacs_asg_dlg_opts_empty", MSG_REVIEWERS_FAILED if reviewers_failed else MSG_NO_REVIEWERS)
+                for index, load in enumerate(loads):
+                    with st.container(key=f"pacs_asg_opt_{'on' if load.uid == picked else 'off'}_{index}"):
+                        with st.container(key=f"pacs_asg_opt_who_{index}", horizontal=True):
+                            _text(f"pacs_asg_opt_name_{index}", load.name)
+                            if target.reassign and load.uid == exam.assignee_uid:
+                                _text(f"pacs_asg_opt_tag_{index}", CURRENT_REVIEWER_TAG)
+                        _text(f"pacs_asg_opt_count_{index}", f"{load.pending} / {load.total}건")
+                        st.button(
+                            f"{load.name} 선택", key=f"pacs_asg_optbtn_{index}_{load.uid}",
+                            width="stretch", on_click=_pick_reviewer, args=(load.uid,),
+                        )
+        with st.container(key="pacs_asg_dlg_memo"):
+            _text("pacs_asg_dlg_memo_label", "배정 메모 (선택)")
+            st.text_input(
+                "배정 메모", key=_MEMO_KEY, placeholder=MEMO_PLACEHOLDER,
+                max_chars=MAX_MEMO_CHARS, label_visibility="collapsed",
+            )
+        with st.container(key="pacs_asg_dlg_actions", horizontal=True):
+            st.button("취소", key="pacs_asg_dlg_cancel", on_click=_close_assign)
+            st.button(
+                "배정하기", key="pacs_asg_dlg_submit",
+                disabled=not any(load.uid == picked for load in loads), on_click=_on_assign_submit,
+            )
+
+
+def _render_result(result: AssignResult) -> None:
+    """배정 결과 안내 창(Figma "배정 완료 안내", "배정 실패 안내"): 확인·바깥을 누르면 닫힙니다."""
+    title = (DONE_TITLES if result.ok else FAIL_TITLES)[result.reassign]
+    message, detail = result.lines
+    st.button("안내 닫기", key="pacs_asg_res_backdrop", on_click=_close_result)
+    with st.container(key=f"pacs_asg_res_{'done' if result.ok else 'fail'}"):
+        _text("pacs_asg_res_title", title)
+        _text("pacs_asg_res_message", message)
+        _text("pacs_asg_res_detail", detail)
+        with st.container(key="pacs_asg_res_actions", horizontal=True):
+            st.button("확인", key="pacs_asg_res_ok", on_click=_close_result)
+
+
 def _render_logout_confirm() -> None:
     title, lines, confirm_label = LOGOUT_TEXTS
     st.button("확인창 닫기", key="pacs_asg_modal_backdrop", on_click=_close_confirm)
@@ -1368,10 +1733,6 @@ def render(user: CurrentUser) -> ReviewAssignEvent | None:
     notice = state.pop(_NOTICE_KEY, None)
     if notice:
         st.toast(notice)
-    request = state.pop(_ASSIGN_KEY, None)
-    if request is not None:
-        # 배정 창(다음 단계)이 들어올 자리입니다. 지금은 요청 내용만 안내합니다.
-        st.toast(MSG_ASSIGN_PENDING.format(count=len(request.case_ids), action="재배정" if request.reassign else "배정"))
 
     exams, load_failed = _list._get_exams(user)
     reviewers, reviewers_failed = _get_reviewers(user)
@@ -1379,11 +1740,20 @@ def render(user: CurrentUser) -> ReviewAssignEvent | None:
     tabs = split_by_tab(filter_exams(exams, condition))
     tab = _current_tab()
 
-    # 검색·상태 변경으로 탭에서 사라진 검사는 선택에서 뺍니다.
-    visible = {e.case_id for e in tabs[tab]}
-    checked = tuple(c for c in _checked() if c in visible)
-    if checked != _checked():
-        state[_CHECKED_KEY] = checked
+    # 검색·상태 변경으로 탭에서 사라진 검사는 체크를 풉니다. 업무 담당자가 아니면 체크하지 않습니다.
+    selected = _selected()
+    if selected and (not can_assign(user) or selected not in {e.case_id for e in tabs[tab]}):
+        state.pop(_SELECTED_KEY, None)
+        selected = None
+    loads = reviewer_workload(reviewers, exams)
+    # 배정 창: 업무 담당자만, 연 검사가 아직 목록에 있을 때만 그립니다.
+    target = state.get(_DIALOG_KEY)
+    target_exam = None
+    if isinstance(target, AssignTarget):
+        target_exam = next((e for e in exams if e.case_id == target.case_id), None)
+        if target_exam is None or not can_assign(user):
+            _clear_dialog()
+            target = None
 
     with st.container(key="pacs_asg_stage"):
         _render_sidebar()
@@ -1392,10 +1762,15 @@ def render(user: CurrentUser) -> ReviewAssignEvent | None:
             _render_title()
             _render_stats(exams)
             _render_filters()
-            _render_table(user, tabs, tab, checked, load_failed)
-            _render_workload(reviewer_workload(reviewers, exams), reviewers_failed)
+            _render_table(user, tabs, tab, selected, load_failed)
+            _render_workload(loads, reviewers_failed)
         if state.get(_HISTORY_OPEN_KEY):
             _render_history(*_get_history(exams, reviewers))
+        if target is not None and target_exam is not None:
+            _render_assign(target, target_exam, loads, reviewers_failed)
+        result = state.get(_RESULT_KEY)
+        if isinstance(result, AssignResult):
+            _render_result(result)
         if state.get(_CONFIRM_KEY):
             _render_logout_confirm()
 
