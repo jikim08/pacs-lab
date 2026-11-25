@@ -26,8 +26,9 @@
   배정은 완료로 안내하고, 그 이력을 세션에 남겨 두었다가 배정 이력 창을 열거나 다음 배정을 할 때 다시 저장합니다.
 팀의 배정 서비스 함수(담당자·이력을 한 번에 저장)가 생기면 이 함수 안을 그 함수 호출로 바꾸면 됩니다.
 
-app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ReviewAssignEvent``로 화면 이동(왼쪽 메뉴, 로그아웃)을
-처리합니다. 로그아웃은 화면 가운데 확인창을 거친 뒤에 EVENT_LOGOUT을 보냅니다.
+app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ReviewAssignEvent``로 로그아웃을 처리합니다.
+로그아웃은 화면 가운데 확인창을 거친 뒤에 EVENT_LOGOUT을 보냅니다.
+왼쪽 사이드바(WORKSPACE 메뉴)는 이 화면이 그리지 않고, app.py가 공통 부품 ``components.sidebar.render``로 그립니다.
 - ``reset_state()``: 이 화면이 세션에 저장한 검색 조건·탭·선택만 지웁니다.
 - ``refresh_reviewers()``: 배정 후 호출하면 다음 화면 표시 때 검토 담당자 목록을 새로 불러옵니다.
   (검사 목록은 case_list.refresh_exams()로 새로 불러옵니다.)
@@ -54,21 +55,18 @@ from src.ui import case_list as _list
 from src.ui.case_list import (
     CALENDAR_PRESETS,
     EVENT_LOGOUT,
-    EVENT_NAVIGATE,
     KST,
     ROLE_ADMIN,
     STATUS_ASSIGNED,
     STATUS_DONE,
     STATUS_REVIEWING,
     STATUS_UNASSIGNED,
-    TARGET_CASE_REGISTER,
     USER_NAME_FALLBACK,
     WEEKDAY_LABELS,
     CurrentUser,
     ExamRecord,
     role_label,
 )
-from src.ui.case_register import TARGET_CASE_LIST
 
 _logger = logging.getLogger(__name__)
 
@@ -93,10 +91,8 @@ HISTORY_RETRY_SECONDS = 0.3
 # 같은 사용자 화면에서 이 시간(초) 안에는 검토 담당자 목록을 다시 불러오지 않습니다.
 REVIEWER_CACHE_SECONDS = 30
 
-# ── 화면 이동 이벤트 (render가 돌려주는 ReviewAssignEvent.kind / target 값) ─────────
-# EVENT_NAVIGATE, EVENT_LOGOUT, TARGET_CASE_REGISTER는 검사 목록 화면과 같은 값을 씁니다.
-
-TARGET_IMAGE_VIEWER = "image_viewer"  # 영상 뷰어 화면(왼쪽 메뉴). 검사 목록·등록 화면 메뉴에도 추가 예정
+# ── 화면 이동 이벤트 (render가 돌려주는 ReviewAssignEvent.kind 값) ──────────────────
+# EVENT_LOGOUT은 검사 목록 화면과 같은 값을 씁니다. 왼쪽 메뉴 이동은 components.sidebar가 처리합니다.
 
 # ── 안내 문구 ────────────────────────────────────────────────────────────────
 
@@ -234,10 +230,9 @@ class HistoryNotSavedError(Exception):
 
 @dataclass(frozen=True)
 class ReviewAssignEvent:
-    """사용자가 다른 화면으로 이동하려 할 때 render가 돌려주는 값."""
+    """사용자가 로그아웃할 때 render가 돌려주는 값(왼쪽 메뉴 이동은 components.sidebar가 돌려줌)."""
 
-    kind: str  # EVENT_NAVIGATE | EVENT_LOGOUT
-    target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_LIST | TARGET_CASE_REGISTER | TARGET_IMAGE_VIEWER
+    kind: str  # EVENT_LOGOUT
 
 
 # ── 데이터 불러오기 ──────────────────────────────────────────────────────────
@@ -469,22 +464,6 @@ def filter_exams(exams: list[ExamRecord], condition: AssignFilter) -> list[ExamR
     )
 
 
-# ── 아이콘 ──────────────────────────────────────────────────────────────────
-# 검사 목록 화면의 아이콘을 그대로 쓰고, 이 화면에서 색이 다른 것(활성 메뉴)과 새 아이콘만 만듭니다.
-
-_ICON_LIST_OFF = _list._ICON_LIST.replace("#202020", "#C1C1C1")
-_ICON_REVIEW_ON = _list._ICON_REVIEW.replace("#C1C1C1", "#202020")
-# 영상 뷰어 모니터 아이콘(Figma 17.6×16.6을 메뉴 아이콘 20×20 위치에 맞춤)
-_ICON_MONITOR = _list._svg(20, 20, (
-    '<g transform="translate(1.2 2.2)">'
-    f'<path d="M2.3 0.8H15.3C16.1284 0.8 16.8 1.47157 16.8 2.3V10.3C16.8 11.1284 16.1284 11.8 15.3 11.8H2.3'
-    f'C1.47157 11.8 0.8 11.1284 0.8 10.3V2.3C0.8 1.47157 1.47157 0.8 2.3 0.8Z" stroke-width="1.6" {_list._STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M8.8 11.8V15.8M4.8 15.8H12.8" stroke-width="1.6" {_list._STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M3.8 7.8L5.8 4.8L7.8 7.8" stroke-width="1.6" {_list._STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M9.8 7.8L11.8 4.8L13.8 7.8" stroke-width="1.6" {_list._STROKE} stroke="#C1C1C1"/></g>'
-))
-
-
 # ── 화면 배치 CSS ────────────────────────────────────────────────────────────
 # 크기는 화면 높이에 비례하는 --u(= 화면 높이 / 960) 단위이고, 좌표는 Figma 레이어 값을 그대로 씁니다.
 # 화면이 디자인(1440)보다 넓으면 검사 표가 넓어지고, 검토자 업무 현황(384)은 오른쪽 끝에 붙습니다.
@@ -540,14 +519,12 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_asg_stage button:focus-visible { outline:2px solid #555 !important; outline-offset:2px; }
 
 /* 절대 좌표로 배치하는 블록 */
-.st-key-pacs_asg_sidebar, .st-key-pacs_asg_header, .st-key-pacs_asg_main,
-.st-key-pacs_asg_menu_list, .st-key-pacs_asg_menu_register, .st-key-pacs_asg_menu_review, .st-key-pacs_asg_menu_viewer,
+.st-key-pacs_asg_header, .st-key-pacs_asg_main,
 .st-key-pacs_asg_clock, .st-key-pacs_asg_logout, .st-key-pacs_asg_title, .st-key-pacs_asg_history_open,
 .st-key-pacs_asg_stats, .st-key-pacs_asg_filters, .st-key-pacs_asg_table, .st-key-pacs_asg_load {
   position:absolute !important;
 }
 /* 절대 좌표로 배치하는 글자 칸: 내용 너비만큼만 차지하고 한 줄로 표시합니다. */
-.st-key-pacs_asg_brand, .st-key-pacs_asg_workspace, .st-key-pacs_asg_server, .st-key-pacs_asg_version,
 .st-key-pacs_asg_crumb_home, .st-key-pacs_asg_crumb_page, .st-key-pacs_asg_user,
 [class*="st-key-pacs_asg_stat_label_"], [class*="st-key-pacs_asg_stat_value_"], [class*="st-key-pacs_asg_stat_note_"],
 [class*="st-key-pacs_asg_th_"], [class*="st-key-pacs_asg_cname_"], [class*="st-key-pacs_asg_cmeta_"],
@@ -564,74 +541,6 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   :is([data-testid="stElementContainer"], [data-testid="stMarkdown"], [data-testid="stMarkdownContainer"], p) {
   width:100% !important; max-width:100%; overflow:hidden; text-overflow:ellipsis;
 }
-
-/* ── 사이드바 (204 × 화면 높이) ── */
-.st-key-pacs_asg_sidebar { left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919; color:#fff; }
-.st-key-pacs_asg_sidebar::before {
-  content:''; position:absolute; left:calc(20 * var(--u)); top:calc(111 * var(--u));
-  width:calc(164 * var(--u)); height:1px; background:#363636;
-}
-.st-key-pacs_asg_brand { left:calc(24 * var(--u)); top:calc(24 * var(--u)); }
-.st-key-pacs_asg_brand::before {
-  content:''; position:absolute; left:0; top:calc(2 * var(--u));
-  width:calc(28 * var(--u)); height:calc(28 * var(--u)); border-radius:calc(6 * var(--u));
-  background:
-    linear-gradient(#191919, #191919) center / calc(16 * var(--u)) calc(4 * var(--u)) no-repeat,
-    linear-gradient(#191919, #191919) center / calc(4 * var(--u)) calc(16 * var(--u)) no-repeat,
-    #f4f4f4;
-}
-.st-key-pacs_asg_brand_name {
-  padding-left:calc(39 * var(--u)); color:#fff; font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700;
-}
-.st-key-pacs_asg_brand_sub { margin-top:calc(8 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
-.st-key-pacs_asg_workspace {
-  left:calc(24 * var(--u)); top:calc(137 * var(--u));
-  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a;
-}
-.st-key-pacs_asg_server {
-  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)) !important; height:calc(65 * var(--u));
-  padding:calc(11 * var(--u)) calc(12 * var(--u)) 0 !important; border-radius:calc(6 * var(--u)); background:#252525;
-}
-.st-key-pacs_asg_server::before {
-  content:''; position:absolute; left:calc(12 * var(--u)); top:calc(11 * var(--u));
-  width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat;
-}
-.st-key-pacs_asg_server_title {
-  padding-left:calc(26 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7;
-}
-.st-key-pacs_asg_server_sub { margin-top:calc(7 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
-.st-key-pacs_asg_version {
-  left:calc(24 * var(--u)); top:calc(927 * var(--u)); white-space:pre; font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e;
-}
-
-/* 메뉴 버튼: 180×44, 52 간격, 아이콘 (14, 12), 글자 x 46 */
-.st-key-pacs_asg_menu_list, .st-key-pacs_asg_menu_register, .st-key-pacs_asg_menu_review, .st-key-pacs_asg_menu_viewer {
-  left:calc(12 * var(--u)); width:calc(180 * var(--u)) !important; height:calc(44 * var(--u));
-}
-.st-key-pacs_asg_menu_list { top:calc(174 * var(--u)); }
-.st-key-pacs_asg_menu_register { top:calc(226 * var(--u)); }
-.st-key-pacs_asg_menu_review { top:calc(278 * var(--u)); }
-.st-key-pacs_asg_menu_viewer { top:calc(330 * var(--u)); }
-.st-key-pacs_asg_sidebar [data-testid="stButton"], .st-key-pacs_asg_sidebar [data-testid="stButton"] button {
-  width:100% !important; height:calc(44 * var(--u)) !important; min-height:0 !important;
-}
-.st-key-pacs_asg_sidebar [data-testid="stButton"] button {
-  justify-content:flex-start !important; padding:0 0 0 calc(46 * var(--u)) !important;
-  border:0 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
-  background-color:transparent !important; background-repeat:no-repeat !important;
-  background-position:calc(14 * var(--u)) center !important; background-size:calc(20 * var(--u)) !important;
-}
-.st-key-pacs_asg_sidebar [data-testid="stButton"] button > div { width:100%; justify-content:flex-start !important; }
-.st-key-pacs_asg_sidebar [data-testid="stButton"] button p {
-  font-size:calc(14 * var(--u)) !important; line-height:calc(21 * var(--u)) !important; color:#c1c1c1 !important;
-}
-.st-key-pacs_asg_sidebar .st-key-pacs_asg_menu_review button { background-color:#f2f2f2 !important; background-image:@ICON_REVIEW_ON@ !important; }
-.st-key-pacs_asg_sidebar .st-key-pacs_asg_menu_review button p { color:#202020 !important; font-weight:700 !important; }
-.st-key-pacs_asg_sidebar .st-key-pacs_asg_menu_list button { background-image:@ICON_LIST_OFF@ !important; }
-.st-key-pacs_asg_sidebar .st-key-pacs_asg_menu_register button { background-image:@ICON_REGISTER@ !important; }
-.st-key-pacs_asg_sidebar .st-key-pacs_asg_menu_viewer button { background-image:@ICON_MONITOR@ !important; }
-.st-key-pacs_asg_sidebar :is(.st-key-pacs_asg_menu_list, .st-key-pacs_asg_menu_register, .st-key-pacs_asg_menu_viewer)
-  button:hover { background-color:#242424 !important; }
 
 /* ── 상단 바 (64 높이) ── */
 .st-key-pacs_asg_header {
@@ -1190,12 +1099,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 """
 
 _STYLE = (
-    _STYLE.replace("@ICON_LIST_OFF@", _list._css_icon(_ICON_LIST_OFF))
-    .replace("@ICON_REGISTER@", _list._css_icon(_list._ICON_REGISTER))
-    .replace("@ICON_REVIEW_ON@", _list._css_icon(_ICON_REVIEW_ON))
-    .replace("@ICON_MONITOR@", _list._css_icon(_ICON_MONITOR))
-    .replace("@ICON_SHIELD@", _list._css_icon(_list._ICON_SHIELD))
-    .replace("@ICON_CHEVRON_RIGHT@", _list._css_icon(_list._ICON_CHEVRON_RIGHT))
+    _STYLE.replace("@ICON_CHEVRON_RIGHT@", _list._css_icon(_list._ICON_CHEVRON_RIGHT))
     .replace("@ICON_LOGOUT@", _list._css_icon(_list._ICON_LOGOUT))
     .replace("@ICON_SEARCH_FIELD@", _list._css_icon(_list._ICON_SEARCH_FIELD))
     .replace("@ICON_CALENDAR@", _list._css_icon(_list._ICON_CALENDAR))
@@ -1208,8 +1112,8 @@ _STYLE = (
 
 # ── 이벤트 처리 (버튼 콜백) ──────────────────────────────────────────────────
 
-def _emit(kind: str, target: str | None = None) -> None:
-    st.session_state[_EVENT_KEY] = ReviewAssignEvent(kind=kind, target=target)
+def _emit(kind: str) -> None:
+    st.session_state[_EVENT_KEY] = ReviewAssignEvent(kind=kind)
 
 
 def _current_tab() -> str:
@@ -1443,30 +1347,6 @@ def _cal_apply() -> None:
 # ── 화면 그리기 ──────────────────────────────────────────────────────────────
 
 _text = _list._text
-
-
-def _render_sidebar() -> None:
-    with st.container(key="pacs_asg_sidebar"):
-        with st.container(key="pacs_asg_brand"):
-            _text("pacs_asg_brand_name", "PACS")
-            _text("pacs_asg_brand_sub", "의료영상 관리 시스템")
-        _text("pacs_asg_workspace", "WORKSPACE")
-        menus = (
-            ("list", "검사 목록", TARGET_CASE_LIST),
-            ("register", "검사 등록", TARGET_CASE_REGISTER),
-            ("review", "검토 배정", None),  # 지금 화면
-            ("viewer", "영상 뷰어", TARGET_IMAGE_VIEWER),
-        )
-        for name, label, target in menus:
-            with st.container(key=f"pacs_asg_menu_{name}"):
-                if target is None:
-                    st.button(label, key=f"pacs_asg_nav_{name}", width="stretch")
-                else:
-                    st.button(label, key=f"pacs_asg_nav_{name}", width="stretch", on_click=_emit, args=(EVENT_NAVIGATE, target))
-        with st.container(key="pacs_asg_server"):
-            _text("pacs_asg_server_title", "서버 연결 정상")
-            _text("pacs_asg_server_sub", "DICOM 서비스 운영 중")
-        _text("pacs_asg_version", "PACS  /  v1.1")
 
 
 @st.fragment(run_every=1)
@@ -1806,7 +1686,6 @@ def render(user: CurrentUser) -> ReviewAssignEvent | None:
             target = None
 
     with st.container(key="pacs_asg_stage"):
-        _render_sidebar()
         _render_header(user)
         with st.container(key="pacs_asg_main"):
             _render_title()
@@ -1830,9 +1709,12 @@ def render(user: CurrentUser) -> ReviewAssignEvent | None:
 if __name__ == "__main__":
     # 단독 실행 시 미리보기 사용자(업무 담당자)로 화면을 봅니다. 백엔드 연결 전이라 목록은 비어 있을 수 있습니다.
     st.set_page_config(page_title="PACS 검토 배정", layout="wide")
+    # 왼쪽 사이드바는 app.py가 그리는 공통 부품이라, 미리보기에서도 같은 부품으로 그립니다(메뉴 이동은 안내만).
+    from src.ui.components import sidebar
+
+    if sidebar.render(sidebar.SCREEN_REVIEW_ASSIGN) is not None:
+        st.toast("다른 화면 이동은 app.py 연결 후 동작합니다.")
     event = render(CurrentUser(uid="preview-admin", role=ROLE_ADMIN, name="김의사"))
     if event is not None and event.kind == EVENT_LOGOUT:
         reset_state()
         st.rerun()
-    elif event is not None:
-        st.toast("화면 이동은 app.py 연결 후 동작합니다.")

@@ -17,6 +17,7 @@ DICOM 사용 여부는 팀에서 아직 결정하지 않았습니다. DICOM 정�
 (DICOM 환자번호와 Firestore 환자 연결, 파일 저장·검사일 저장은 팀 결정 후 연결).
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``RegisterEvent``로 화면 이동·등록을 처리합니다.
+왼쪽 사이드바(WORKSPACE 메뉴)는 이 화면이 그리지 않고, app.py가 공통 부품 ``components.sidebar.render``로 그립니다.
 current_user는 ``case_list.current_user_from_profile(session.get_current_user())``로 만듭니다.
 - ``start_edit(edit_target_from_case(case, files))``: 검사 목록의 수정 확인 후 호출. 기존 검사 정보가 채워진
   수정 화면(제목 "검사 수정", 버튼 "수정 저장")이 되고, 수정 저장을 누르면 EVENT_UPDATE(draft.case_id 포함)를 돌려줍니다.
@@ -40,13 +41,13 @@ from datetime import date, datetime
 import streamlit as st
 
 from src.config import MAX_IMAGE_SIZE_MB
+from src.ui.components.sidebar import SCREEN_CASE_LIST
 from src.ui.case_list import (
     EVENT_LOGOUT,
     EVENT_NAVIGATE,
     KST,
     ROLE_LABELS,
     ROLE_REGISTRAR,
-    TARGET_REVIEW_ASSIGN,
     USER_NAME_FALLBACK,
     CurrentUser,
     current_user_from_profile,
@@ -79,11 +80,11 @@ BADGE_EDIT = "기존 검사 · 수정 중"  # 수정 화면: 아직 바뀐 내�
 BADGE_EDIT_READY = "수정 준비 완료"  # 수정 화면: 수정 저장 버튼을 누를 수 있음
 
 # ── 화면 이동·등록 이벤트 (render가 돌려주는 RegisterEvent.kind / target 값) ─────────
-# EVENT_NAVIGATE, EVENT_LOGOUT, TARGET_REVIEW_ASSIGN은 검사 목록 화면과 같은 값을 씁니다.
+# EVENT_NAVIGATE, EVENT_LOGOUT은 검사 목록 화면과 같은 값을 씁니다.
 
 EVENT_SUBMIT = "submit_case"  # 검사 등록 버튼 (draft 포함)
 EVENT_UPDATE = "update_case"  # 수정 화면의 수정 저장 버튼 (draft.case_id에 수정할 검사)
-TARGET_CASE_LIST = "case_list"  # 검사 목록 화면 (왼쪽 메뉴, 취소 버튼)
+TARGET_CASE_LIST = SCREEN_CASE_LIST  # 검사 목록 화면 (취소 버튼). 사이드바의 화면 이름과 같은 값
 
 # ── 안내 문구 ────────────────────────────────────────────────────────────────
 
@@ -186,8 +187,8 @@ class CaseDraft:
 class RegisterEvent:
     """사용자가 화면을 이동하거나 등록하려 할 때 render가 돌려주는 값."""
 
-    kind: str  # EVENT_NAVIGATE | EVENT_LOGOUT | EVENT_SUBMIT | EVENT_UPDATE
-    target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_LIST | TARGET_REVIEW_ASSIGN
+    kind: str  # EVENT_NAVIGATE(취소 버튼) | EVENT_LOGOUT | EVENT_SUBMIT | EVENT_UPDATE
+    target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_LIST
     draft: CaseDraft | None = None  # EVENT_SUBMIT·EVENT_UPDATE일 때
 
 
@@ -540,43 +541,6 @@ def _svg(width: float, height: float, body: str) -> str:
 
 
 _STROKE = 'stroke-linecap="round" stroke-linejoin="round"'
-# 검사 등록 화면에서는 "검사 목록" 메뉴가 비활성(#C1C1C1), "검사 등록" 메뉴가 활성(#202020)입니다.
-_ICON_LIST = _svg(20, 20, (
-    f'<path d="M5 2.5H15C15.9205 2.5 16.6667 3.24619 16.6667 4.16667V15.8333C16.6667 16.7538 15.9205 17.5 15 17.5H5'
-    f'C4.07953 17.5 3.33333 16.7538 3.33333 15.8333V4.16667C3.33333 3.24619 4.07953 2.5 5 2.5Z" '
-    f'stroke-width="1.6" {_STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M6.66667 6.66667H13.3333M6.66667 10H13.3333M6.66667 13.3333H10.8333" '
-    f'stroke-width="1.6" {_STROKE} stroke="#C1C1C1"/>'
-))
-# 문서(14×16)와 더하기(6×6)를 Figma 배치대로 20×20 한 장에 합칩니다.
-_ICON_REGISTER = _svg(20, 20, (
-    '<g transform="translate(3 2)">'
-    f'<path d="M8.25 0.75H2.25C1.85218 0.75 1.47064 0.908035 1.18934 1.18934C0.908035 1.47064 0.75 1.85218 0.75 2.25'
-    f'V13.75C0.75 14.1478 0.908035 14.5294 1.18934 14.8107C1.47064 15.092 1.85218 15.25 2.25 15.25H11.75'
-    f'C12.1478 15.25 12.5294 15.092 12.8107 14.8107C13.092 14.5294 13.25 14.1478 13.25 13.75V5.75L8.25 0.75Z" '
-    f'stroke-width="1.5" {_STROKE} stroke="#202020"/>'
-    f'<path d="M8.25 0.75V4.75C8.25 5.01522 8.35536 5.26957 8.54289 5.45711C8.73043 5.64464 8.98478 5.75 9.25 5.75'
-    f'H13.25" stroke-width="1.5" {_STROKE} stroke="#202020"/></g>'
-    '<g transform="translate(7 9.25)"><path d="M3 0.75V5.25M0.75 3H5.25" stroke-width="1.5" '
-    'stroke-linecap="round" stroke="#202020"/></g>'
-))
-# 사람(10.5×15.75)과 체크(6.5×4.75)를 Figma 배치대로 합칩니다.
-_ICON_REVIEW = _svg(20, 20, (
-    '<g transform="translate(2 2.25)">'
-    f'<path d="M8.25 3.75C8.25 5.40685 6.90685 6.75 5.25 6.75C3.59315 6.75 2.25 5.40685 2.25 3.75'
-    f'C2.25 2.09315 3.59315 0.75 5.25 0.75C6.90685 0.75 8.25 2.09315 8.25 3.75Z" '
-    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M0.75 15V13.25C0.75 12.1891 1.17143 11.1717 1.92157 10.4216C2.67172 9.67143 3.68913 9.25 4.75 9.25'
-    f'H5.75C6.81087 9.25 7.82828 9.67143 8.57843 10.4216C9.32857 11.1717 9.75 12.1891 9.75 13.25V15" '
-    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/></g>'
-    f'<g transform="translate(11.5 7)"><path d="M0.75 2L2.75 4L5.75 0.750004" stroke-width="1.5" '
-    f'{_STROKE} stroke="#C1C1C1"/></g>'
-))
-_ICON_SHIELD = _svg(18, 18, (
-    f'<path d="M9 2.25L15 4.5V9C15 12.75 9 15.75 9 15.75C9 15.75 3 12.75 3 9V4.5L9 2.25Z" '
-    f'stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
-    f'<path d="M6 9L8.25 11.25L12 6.75" stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
-))
 _ICON_CHEVRON_RIGHT = _svg(16, 16, f'<path d="M6 4L10 8L6 12" stroke-width="1.6" {_STROKE} stroke="#999999"/>')
 _ICON_LOGOUT = _svg(16, 16, (
     '<path d="M7.5 2.5H2.5V13.5H7.5M7.5 8H13.5M10.5 11L13.5 8L10.5 5" stroke-width="1.6" stroke="#555555"/>'
@@ -599,7 +563,7 @@ def _css_icon(svg: str) -> str:
 # ── 화면 배치 CSS ────────────────────────────────────────────────────────────
 # 모든 크기는 화면 높이에 비례하는 --u(= 화면 높이 / 960) 단위이고, 좌표는 Figma 레이어 값을 그대로 씁니다.
 # 화면이 디자인(1440)보다 넓으면 카드 너비가 늘어나고, 오른쪽 요소는 오른쪽 끝을 기준으로 붙습니다.
-# 왼쪽 메뉴·상단 바는 검사 목록 화면과 같은 모양입니다(key 이름만 pacs_reg_로 다름).
+# 상단 바는 검사 목록 화면과 같은 모양입니다(key 이름만 pacs_reg_로 다름). 왼쪽 사이드바는 components/sidebar.py
 
 _STYLE = """
 <style>
@@ -652,8 +616,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 .st-key-pacs_reg_stage button:focus-visible { outline:2px solid #3266c3 !important; outline-offset:2px; }
 
 /* 절대 좌표로 배치하는 블록 */
-.st-key-pacs_reg_sidebar, .st-key-pacs_reg_header, .st-key-pacs_reg_main,
-.st-key-pacs_reg_menu_list, .st-key-pacs_reg_menu_register, .st-key-pacs_reg_menu_review,
+.st-key-pacs_reg_header, .st-key-pacs_reg_main,
 .st-key-pacs_reg_clock, .st-key-pacs_reg_logout, .st-key-pacs_reg_title,
 .st-key-pacs_reg_info, .st-key-pacs_reg_dicom, .st-key-pacs_reg_upload, .st-key-pacs_reg_thead,
 .st-key-pacs_reg_rows, .st-key-pacs_reg_empty, .st-key-pacs_reg_cancel, .st-key-pacs_reg_submit,
@@ -661,7 +624,6 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
   position:absolute !important;
 }
 /* 절대 좌표로 배치하는 글자 칸: 내용 너비만큼만 차지하고 한 줄로 표시합니다. */
-.st-key-pacs_reg_brand, .st-key-pacs_reg_workspace, .st-key-pacs_reg_server, .st-key-pacs_reg_version,
 .st-key-pacs_reg_crumb_home, .st-key-pacs_reg_crumb_page, .st-key-pacs_reg_user,
 [class*="st-key-pacs_reg_badge_"], .st-key-pacs_reg_info_title, .st-key-pacs_reg_required, .st-key-pacs_reg_help,
 .st-key-pacs_reg_dicom_title, .st-key-pacs_reg_count, .st-key-pacs_reg_dicom_sub,
@@ -670,76 +632,6 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 [class*="st-key-pacs_reg_cstatus_"] {
   position:absolute !important; width:auto !important; white-space:nowrap;
 }
-
-/* ── 사이드바 (204 × 화면 높이, 검사 목록 화면과 같음) ── */
-.st-key-pacs_reg_sidebar {
-  left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919; color:#fff;
-}
-.st-key-pacs_reg_sidebar::before {
-  content:''; position:absolute; left:calc(20 * var(--u)); top:calc(111 * var(--u));
-  width:calc(164 * var(--u)); height:1px; background:#363636;
-}
-.st-key-pacs_reg_brand { left:calc(24 * var(--u)); top:calc(24 * var(--u)); }
-.st-key-pacs_reg_brand::before {
-  content:''; position:absolute; left:0; top:calc(2 * var(--u));
-  width:calc(28 * var(--u)); height:calc(28 * var(--u)); border-radius:calc(6 * var(--u));
-  background:
-    linear-gradient(#191919, #191919) center / calc(16 * var(--u)) calc(4 * var(--u)) no-repeat,
-    linear-gradient(#191919, #191919) center / calc(4 * var(--u)) calc(16 * var(--u)) no-repeat,
-    #f4f4f4;
-}
-.st-key-pacs_reg_brand_name {
-  padding-left:calc(39 * var(--u)); color:#fff;
-  font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700;
-}
-.st-key-pacs_reg_brand_sub { margin-top:calc(8 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
-.st-key-pacs_reg_workspace {
-  left:calc(24 * var(--u)); top:calc(137 * var(--u));
-  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a;
-}
-.st-key-pacs_reg_server {
-  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)) !important; height:calc(65 * var(--u));
-  padding:calc(11 * var(--u)) calc(12 * var(--u)) 0 !important; border-radius:calc(6 * var(--u)); background:#252525;
-}
-.st-key-pacs_reg_server::before {
-  content:''; position:absolute; left:calc(12 * var(--u)); top:calc(11 * var(--u));
-  width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat;
-}
-.st-key-pacs_reg_server_title {
-  padding-left:calc(26 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7;
-}
-.st-key-pacs_reg_server_sub { margin-top:calc(7 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
-.st-key-pacs_reg_version {
-  left:calc(24 * var(--u)); top:calc(927 * var(--u)); white-space:pre;
-  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e;
-}
-
-/* 메뉴 버튼: 180×44, 아이콘 (14, 12), 글자 x 46. 검사 등록 메뉴가 활성 상태입니다. */
-.st-key-pacs_reg_menu_list, .st-key-pacs_reg_menu_register, .st-key-pacs_reg_menu_review {
-  left:calc(12 * var(--u)); width:calc(180 * var(--u)) !important; height:calc(44 * var(--u));
-}
-.st-key-pacs_reg_menu_list { top:calc(174 * var(--u)); }
-.st-key-pacs_reg_menu_register { top:calc(226 * var(--u)); }
-.st-key-pacs_reg_menu_review { top:calc(278 * var(--u)); }
-.st-key-pacs_reg_sidebar [data-testid="stButton"], .st-key-pacs_reg_sidebar [data-testid="stButton"] button {
-  width:100% !important; height:calc(44 * var(--u)) !important; min-height:0 !important;
-}
-.st-key-pacs_reg_sidebar [data-testid="stButton"] button {
-  justify-content:flex-start !important; padding:0 0 0 calc(46 * var(--u)) !important;
-  border:0 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
-  background-color:transparent !important; background-repeat:no-repeat !important;
-  background-position:calc(14 * var(--u)) center !important; background-size:calc(20 * var(--u)) !important;
-}
-.st-key-pacs_reg_sidebar [data-testid="stButton"] button > div { width:100%; justify-content:flex-start !important; }
-.st-key-pacs_reg_sidebar [data-testid="stButton"] button p {
-  font-size:calc(14 * var(--u)) !important; line-height:calc(21 * var(--u)) !important; color:#c1c1c1 !important;
-}
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_register button { background-color:#f2f2f2 !important; background-image:@ICON_REGISTER@ !important; }
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_register button p { color:#202020 !important; font-weight:700 !important; }
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_list button { background-image:@ICON_LIST@ !important; }
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_review button { background-image:@ICON_REVIEW@ !important; }
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_list button:hover,
-.st-key-pacs_reg_sidebar .st-key-pacs_reg_menu_review button:hover { background-color:#242424 !important; }
 
 /* ── 상단 바 (64 높이, 검사 목록 화면과 같음) ── */
 .st-key-pacs_reg_header {
@@ -1019,11 +911,7 @@ html, body, .stApp, .stMain { background:#f7f8fa !important; }
 """
 
 _STYLE = (
-    _STYLE.replace("@ICON_LIST@", _css_icon(_ICON_LIST))
-    .replace("@ICON_REGISTER@", _css_icon(_ICON_REGISTER))
-    .replace("@ICON_REVIEW@", _css_icon(_ICON_REVIEW))
-    .replace("@ICON_SHIELD@", _css_icon(_ICON_SHIELD))
-    .replace("@ICON_CHEVRON_RIGHT@", _css_icon(_ICON_CHEVRON_RIGHT))
+    _STYLE.replace("@ICON_CHEVRON_RIGHT@", _css_icon(_ICON_CHEVRON_RIGHT))
     .replace("@ICON_LOGOUT@", _css_icon(_ICON_LOGOUT))
     .replace("@ICON_AVATAR@", _css_icon(_ICON_AVATAR))
     .replace("@ICON_REMOVE@", _css_icon(_ICON_REMOVE))
@@ -1102,30 +990,6 @@ def _text(key: str, body: object, align: str = "left") -> None:
     """글자 한 덩어리를 표시합니다. 글꼴·색·위치는 key 이름으로 위의 CSS가 정합니다."""
     with st.container(key=key):
         st.markdown("  \n".join(_md(line) for line in str(body).split("\n")), text_alignment=align)
-
-
-def _render_sidebar() -> None:
-    with st.container(key="pacs_reg_sidebar"):
-        with st.container(key="pacs_reg_brand"):
-            _text("pacs_reg_brand_name", "PACS")
-            _text("pacs_reg_brand_sub", "의료영상 관리 시스템")
-        _text("pacs_reg_workspace", "WORKSPACE")
-        with st.container(key="pacs_reg_menu_list"):
-            st.button(
-                "검사 목록", key="pacs_reg_nav_list", width="stretch",
-                on_click=_emit, args=(EVENT_NAVIGATE, TARGET_CASE_LIST),
-            )
-        with st.container(key="pacs_reg_menu_register"):
-            st.button("검사 등록", key="pacs_reg_nav_register", width="stretch")
-        with st.container(key="pacs_reg_menu_review"):
-            st.button(
-                "검토 배정", key="pacs_reg_nav_review", width="stretch",
-                on_click=_emit, args=(EVENT_NAVIGATE, TARGET_REVIEW_ASSIGN),
-            )
-        with st.container(key="pacs_reg_server"):
-            _text("pacs_reg_server_title", "서버 연결 정상")
-            _text("pacs_reg_server_sub", "DICOM 서비스 운영 중")
-        _text("pacs_reg_version", "PACS  /  v1.1")
 
 
 @st.fragment(run_every=1)
@@ -1300,7 +1164,6 @@ def render(user: CurrentUser) -> RegisterEvent | None:
     summary = summarize(user, files, exam_name, edit)
 
     with st.container(key="pacs_reg_stage"):
-        _render_sidebar()
         _render_header(user, editing)
         with st.container(key="pacs_reg_main"):
             _render_title(summary, editing)
@@ -1324,6 +1187,11 @@ def _preview_user() -> CurrentUser:
 if __name__ == "__main__":
     # 단독 실행 시 샘플 사용자로 화면을 미리 봅니다. 화면 이동·저장은 app.py에서 처리할 예정이라 안내만 띄웁니다.
     st.set_page_config(page_title="PACS 검사 등록", layout="wide")
+    # 왼쪽 사이드바는 app.py가 그리는 공통 부품이라, 미리보기에서도 같은 부품으로 그립니다(메뉴 이동은 안내만).
+    from src.ui.components import sidebar
+
+    if sidebar.render(sidebar.SCREEN_CASE_REGISTER) is not None:
+        st.toast("다른 화면 이동은 app.py 연결 후 동작합니다.")
     event = render(_preview_user())
     if event is not None and event.kind == EVENT_LOGOUT:
         reset_state()
@@ -1334,5 +1202,4 @@ if __name__ == "__main__":
         action = "수정할" if event.kind == EVENT_UPDATE else "등록할"
         st.toast(f"{action} 내용: {draft.patient_name} · {draft.exam_name} · 영상 {len(draft.files)}개 (저장은 아직 연결 전)")
     elif event is not None:
-        targets = {TARGET_CASE_LIST: "검사 목록", TARGET_REVIEW_ASSIGN: "검토 배정"}
-        st.toast(f"{targets.get(event.target or '', '해당')} 화면 이동은 app.py 연결 후 동작합니다.")
+        st.toast("검사 목록 화면 이동은 app.py 연결 후 동작합니다.")

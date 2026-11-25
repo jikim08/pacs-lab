@@ -4,7 +4,9 @@
 검사 데이터는 ``load_exams``가 백엔드(services.case.get_case_list 등)에서 불러옵니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ExamListEvent``로 화면 이동(영상 뷰어, 수정,
-다른 메뉴, 로그아웃)을 처리합니다. 로그아웃·수정 버튼은 화면 가운데 확인창을 거친 뒤에 이벤트를 보냅니다.
+로그아웃)을 처리합니다. 로그아웃·수정 버튼은 화면 가운데 확인창을 거친 뒤에 이벤트를 보냅니다.
+왼쪽 사이드바(WORKSPACE 메뉴)는 이 화면이 그리지 않고, app.py가 공통 부품 ``components.sidebar.render``로 그립니다.
+이 화면은 사이드바 자리(왼쪽 204)를 비워 두고 그립니다.
 - EVENT_EDIT(case_id): 검사 등록 화면의 수정 모드로 이동합니다(case_register.start_edit 참고).
 
 단독 실행하면 샘플 사용자로 화면을 미리 볼 수 있고, 주소 끝에 ``?role=REVIEWER``처럼 역할을 붙이면
@@ -87,11 +89,10 @@ CASE_LIST_LIMIT = 50
 
 EVENT_OPEN_VIEWER = "open_viewer"  # 영상 뷰어 버튼 (case_id 포함)
 EVENT_EDIT = "edit"  # 수정 확인창의 수정 버튼 (case_id 포함)
-EVENT_NAVIGATE = "navigate"  # 왼쪽 메뉴 (target 포함)
 EVENT_LOGOUT = "logout"  # 로그아웃 확인창의 로그아웃 버튼
-
-TARGET_CASE_REGISTER = "case_register"  # 검사 등록 화면
-TARGET_REVIEW_ASSIGN = "review_assign"  # 검토 배정 화면
+# 다른 화면으로 이동(target 포함). 이 화면은 보내지 않고, 검사 등록 화면의 취소 버튼이 같은 값을 씁니다.
+# 왼쪽 메뉴 이동은 components.sidebar.render가 돌려주는 화면 이름으로 app.py가 처리합니다.
+EVENT_NAVIGATE = "navigate"
 
 # ── 안내 문구 (디자인 확정 전 임시 문구) ──────────────────────────────────────────
 
@@ -184,9 +185,8 @@ class SearchFilter:
 class ExamListEvent:
     """사용자가 다른 화면으로 이동하려 할 때 render가 돌려주는 값."""
 
-    kind: str  # EVENT_OPEN_VIEWER | EVENT_EDIT | EVENT_NAVIGATE | EVENT_LOGOUT
+    kind: str  # EVENT_OPEN_VIEWER | EVENT_EDIT | EVENT_LOGOUT
     case_id: str | None = None
-    target: str | None = None  # EVENT_NAVIGATE일 때: TARGET_CASE_REGISTER | TARGET_REVIEW_ASSIGN
 
 
 # ── 로그인 사용자 ────────────────────────────────────────────────────────────
@@ -479,42 +479,6 @@ def _svg(width: float, height: float, body: str) -> str:
 
 
 _STROKE = 'stroke-linecap="round" stroke-linejoin="round"'
-_ICON_LIST = _svg(20, 20, (
-    f'<path d="M5 2.5H15C15.9205 2.5 16.6667 3.24619 16.6667 4.16667V15.8333C16.6667 16.7538 15.9205 17.5 15 17.5H5'
-    f'C4.07953 17.5 3.33333 16.7538 3.33333 15.8333V4.16667C3.33333 3.24619 4.07953 2.5 5 2.5Z" '
-    f'stroke-width="1.6" {_STROKE} stroke="#202020"/>'
-    f'<path d="M6.66667 6.66667H13.3333M6.66667 10H13.3333M6.66667 13.3333H10.8333" '
-    f'stroke-width="1.6" {_STROKE} stroke="#202020"/>'
-))
-# 문서(14×16)와 더하기(6×6)를 Figma 배치대로 20×20 한 장에 합칩니다.
-_ICON_REGISTER = _svg(20, 20, (
-    '<g transform="translate(3 2)">'
-    f'<path d="M8.25 0.75H2.25C1.85218 0.75 1.47064 0.908035 1.18934 1.18934C0.908035 1.47064 0.75 1.85218 0.75 2.25'
-    f'V13.75C0.75 14.1478 0.908035 14.5294 1.18934 14.8107C1.47064 15.092 1.85218 15.25 2.25 15.25H11.75'
-    f'C12.1478 15.25 12.5294 15.092 12.8107 14.8107C13.092 14.5294 13.25 14.1478 13.25 13.75V5.75L8.25 0.75Z" '
-    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M8.25 0.75V4.75C8.25 5.01522 8.35536 5.26957 8.54289 5.45711C8.73043 5.64464 8.98478 5.75 9.25 5.75'
-    f'H13.25" stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/></g>'
-    '<g transform="translate(7 9.25)"><path d="M3 0.75V5.25M0.75 3H5.25" stroke-width="1.5" '
-    'stroke-linecap="round" stroke="#C1C1C1"/></g>'
-))
-# 사람(10.5×15.75)과 체크(6.5×4.75)를 Figma 배치대로 합칩니다.
-_ICON_REVIEW = _svg(20, 20, (
-    '<g transform="translate(2 2.25)">'
-    f'<path d="M8.25 3.75C8.25 5.40685 6.90685 6.75 5.25 6.75C3.59315 6.75 2.25 5.40685 2.25 3.75'
-    f'C2.25 2.09315 3.59315 0.75 5.25 0.75C6.90685 0.75 8.25 2.09315 8.25 3.75Z" '
-    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/>'
-    f'<path d="M0.75 15V13.25C0.75 12.1891 1.17143 11.1717 1.92157 10.4216C2.67172 9.67143 3.68913 9.25 4.75 9.25'
-    f'H5.75C6.81087 9.25 7.82828 9.67143 8.57843 10.4216C9.32857 11.1717 9.75 12.1891 9.75 13.25V15" '
-    f'stroke-width="1.5" {_STROKE} stroke="#C1C1C1"/></g>'
-    f'<g transform="translate(11.5 7)"><path d="M0.75 2L2.75 4L5.75 0.750004" stroke-width="1.5" '
-    f'{_STROKE} stroke="#C1C1C1"/></g>'
-))
-_ICON_SHIELD = _svg(18, 18, (
-    f'<path d="M9 2.25L15 4.5V9C15 12.75 9 15.75 9 15.75C9 15.75 3 12.75 3 9V4.5L9 2.25Z" '
-    f'stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
-    f'<path d="M6 9L8.25 11.25L12 6.75" stroke-width="1.6" {_STROKE} stroke="#BDBDBD"/>'
-))
 _ICON_CHEVRON_RIGHT = _svg(16, 16, f'<path d="M6 4L10 8L6 12" stroke-width="1.6" {_STROKE} stroke="#999999"/>')
 _ICON_LOGOUT = _svg(16, 16, (
     '<path d="M7.5 2.5H2.5V13.5H7.5M7.5 8H13.5M10.5 11L13.5 8L10.5 5" stroke-width="1.6" stroke="#555555"/>'
@@ -611,15 +575,13 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_list_stage [data-testid="stButtonShortcut"], .st-key-pacs_list_stage kbd { display:none !important; }
 
 /* 절대 좌표로 배치하는 블록 */
-.st-key-pacs_list_sidebar, .st-key-pacs_list_header, .st-key-pacs_list_main,
-.st-key-pacs_list_menu_list, .st-key-pacs_list_menu_register, .st-key-pacs_list_menu_review,
+.st-key-pacs_list_header, .st-key-pacs_list_main,
 .st-key-pacs_list_clock, .st-key-pacs_list_logout, .st-key-pacs_list_title,
 .st-key-pacs_list_stats, .st-key-pacs_list_filters, .st-key-pacs_list_count,
 .st-key-pacs_list_table, .st-key-pacs_list_detail, .st-key-pacs_list_edit, .st-key-pacs_list_viewer {
   position:absolute !important;
 }
 /* 절대 좌표로 배치하는 글자 칸: 내용 너비만큼만 차지하고 한 줄로 표시합니다. */
-.st-key-pacs_list_brand, .st-key-pacs_list_workspace, .st-key-pacs_list_server, .st-key-pacs_list_version,
 .st-key-pacs_list_crumb_home, .st-key-pacs_list_crumb_page, .st-key-pacs_list_user,
 [class*="st-key-pacs_list_stat_label_"], [class*="st-key-pacs_list_stat_value_"], [class*="st-key-pacs_list_stat_note_"],
 [class*="st-key-pacs_list_th_"], [class*="st-key-pacs_list_cname_"], [class*="st-key-pacs_list_cmeta_"],
@@ -637,76 +599,6 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   :is([data-testid="stElementContainer"], [data-testid="stMarkdown"], [data-testid="stMarkdownContainer"], p) {
   width:100% !important; max-width:100%; overflow:hidden; text-overflow:ellipsis;
 }
-
-/* ── 사이드바 (204 × 화면 높이) ── */
-.st-key-pacs_list_sidebar {
-  left:0; top:0; width:calc(204 * var(--u)) !important; height:100vh; background:#191919; color:#fff;
-}
-.st-key-pacs_list_sidebar::before {
-  content:''; position:absolute; left:calc(20 * var(--u)); top:calc(111 * var(--u));
-  width:calc(164 * var(--u)); height:1px; background:#363636;
-}
-.st-key-pacs_list_brand { left:calc(24 * var(--u)); top:calc(24 * var(--u)); }
-.st-key-pacs_list_brand::before {
-  content:''; position:absolute; left:0; top:calc(2 * var(--u));
-  width:calc(28 * var(--u)); height:calc(28 * var(--u)); border-radius:calc(6 * var(--u));
-  background:
-    linear-gradient(#191919, #191919) center / calc(16 * var(--u)) calc(4 * var(--u)) no-repeat,
-    linear-gradient(#191919, #191919) center / calc(4 * var(--u)) calc(16 * var(--u)) no-repeat,
-    #f4f4f4;
-}
-.st-key-pacs_list_brand_name {
-  padding-left:calc(39 * var(--u)); color:#fff;
-  font-size:calc(23 * var(--u)); line-height:calc(35 * var(--u)); font-weight:700;
-}
-.st-key-pacs_list_brand_sub { margin-top:calc(8 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); color:#a7a7a7; }
-.st-key-pacs_list_workspace {
-  left:calc(24 * var(--u)); top:calc(137 * var(--u));
-  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); font-weight:500; color:#9a9a9a;
-}
-.st-key-pacs_list_server {
-  left:calc(16 * var(--u)); top:calc(842 * var(--u)); width:calc(172 * var(--u)) !important; height:calc(65 * var(--u));
-  padding:calc(11 * var(--u)) calc(12 * var(--u)) 0 !important; border-radius:calc(6 * var(--u)); background:#252525;
-}
-.st-key-pacs_list_server::before {
-  content:''; position:absolute; left:calc(12 * var(--u)); top:calc(11 * var(--u));
-  width:calc(18 * var(--u)); height:calc(18 * var(--u)); background:@ICON_SHIELD@ center / contain no-repeat;
-}
-.st-key-pacs_list_server_title {
-  padding-left:calc(26 * var(--u)); font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); font-weight:500; color:#d7d7d7;
-}
-.st-key-pacs_list_server_sub { margin-top:calc(7 * var(--u)); font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#a5a5a5; }
-.st-key-pacs_list_version {
-  left:calc(24 * var(--u)); top:calc(927 * var(--u)); white-space:pre;
-  font-size:calc(10 * var(--u)); line-height:calc(15 * var(--u)); color:#8e8e8e;
-}
-
-/* 메뉴 버튼: 180×44, 아이콘 (14, 12), 글자 x 46 */
-.st-key-pacs_list_menu_list, .st-key-pacs_list_menu_register, .st-key-pacs_list_menu_review {
-  left:calc(12 * var(--u)); width:calc(180 * var(--u)) !important; height:calc(44 * var(--u));
-}
-.st-key-pacs_list_menu_list { top:calc(174 * var(--u)); }
-.st-key-pacs_list_menu_register { top:calc(226 * var(--u)); }
-.st-key-pacs_list_menu_review { top:calc(278 * var(--u)); }
-.st-key-pacs_list_sidebar [data-testid="stButton"], .st-key-pacs_list_sidebar [data-testid="stButton"] button {
-  width:100% !important; height:calc(44 * var(--u)) !important; min-height:0 !important;
-}
-.st-key-pacs_list_sidebar [data-testid="stButton"] button {
-  justify-content:flex-start !important; padding:0 0 0 calc(46 * var(--u)) !important;
-  border:0 !important; border-radius:calc(6 * var(--u)) !important; box-shadow:none !important;
-  background-color:transparent !important; background-repeat:no-repeat !important;
-  background-position:calc(14 * var(--u)) center !important; background-size:calc(20 * var(--u)) !important;
-}
-.st-key-pacs_list_sidebar [data-testid="stButton"] button > div { width:100%; justify-content:flex-start !important; }
-.st-key-pacs_list_sidebar [data-testid="stButton"] button p {
-  font-size:calc(14 * var(--u)) !important; line-height:calc(21 * var(--u)) !important; color:#c1c1c1 !important;
-}
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_list button { background-color:#f2f2f2 !important; background-image:@ICON_LIST@ !important; }
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_list button p { color:#202020 !important; font-weight:700 !important; }
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_register button { background-image:@ICON_REGISTER@ !important; }
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_review button { background-image:@ICON_REVIEW@ !important; }
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_register button:hover,
-.st-key-pacs_list_sidebar .st-key-pacs_list_menu_review button:hover { background-color:#242424 !important; }
 
 /* ── 상단 바 (64 높이) ── */
 .st-key-pacs_list_header {
@@ -1198,11 +1090,7 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 """
 
 _STYLE = (
-    _STYLE.replace("@ICON_LIST@", _css_icon(_ICON_LIST))
-    .replace("@ICON_REGISTER@", _css_icon(_ICON_REGISTER))
-    .replace("@ICON_REVIEW@", _css_icon(_ICON_REVIEW))
-    .replace("@ICON_SHIELD@", _css_icon(_ICON_SHIELD))
-    .replace("@ICON_CHEVRON_RIGHT@", _css_icon(_ICON_CHEVRON_RIGHT))
+    _STYLE.replace("@ICON_CHEVRON_RIGHT@", _css_icon(_ICON_CHEVRON_RIGHT))
     .replace("@ICON_LOGOUT@", _css_icon(_ICON_LOGOUT))
     .replace("@ICON_SEARCH_FIELD@", _css_icon(_ICON_SEARCH_FIELD))
     .replace("@ICON_CALENDAR@", _css_icon(_ICON_CALENDAR))
@@ -1217,8 +1105,8 @@ _STYLE = (
 
 # ── 이벤트 처리 (버튼 콜백) ──────────────────────────────────────────────────
 
-def _emit(kind: str, case_id: str | None = None, target: str | None = None) -> None:
-    st.session_state[_EVENT_KEY] = ExamListEvent(kind=kind, case_id=case_id, target=target)
+def _emit(kind: str, case_id: str | None = None) -> None:
+    st.session_state[_EVENT_KEY] = ExamListEvent(kind=kind, case_id=case_id)
 
 
 def _select(case_id: str) -> None:
@@ -1392,30 +1280,6 @@ def _badge_kind(status: str) -> str:
 def _patient_meta(exam: ExamRecord) -> str:
     age = f"{exam.patient_age}세" if exam.patient_age is not None else "-"
     return f"{exam.patient_sex or '-'} · {age}"
-
-
-def _render_sidebar() -> None:
-    with st.container(key="pacs_list_sidebar"):
-        with st.container(key="pacs_list_brand"):
-            _text("pacs_list_brand_name", "PACS")
-            _text("pacs_list_brand_sub", "의료영상 관리 시스템")
-        _text("pacs_list_workspace", "WORKSPACE")
-        with st.container(key="pacs_list_menu_list"):
-            st.button("검사 목록", key="pacs_list_nav_list", width="stretch")
-        with st.container(key="pacs_list_menu_register"):
-            st.button(
-                "검사 등록", key="pacs_list_nav_register", width="stretch",
-                on_click=_emit, args=(EVENT_NAVIGATE, None, TARGET_CASE_REGISTER),
-            )
-        with st.container(key="pacs_list_menu_review"):
-            st.button(
-                "검토 배정", key="pacs_list_nav_review", width="stretch",
-                on_click=_emit, args=(EVENT_NAVIGATE, None, TARGET_REVIEW_ASSIGN),
-            )
-        with st.container(key="pacs_list_server"):
-            _text("pacs_list_server_title", "서버 연결 정상")
-            _text("pacs_list_server_sub", "DICOM 서비스 운영 중")
-        _text("pacs_list_version", "PACS  /  v1.1")
 
 
 @st.fragment(run_every=1)
@@ -1683,7 +1547,6 @@ def render(user: CurrentUser) -> ExamListEvent | None:
     selected = next((e for e in rows if e.case_id == selected_id), None)
 
     with st.container(key="pacs_list_stage"):
-        _render_sidebar()
         _render_header(user)
         with st.container(key="pacs_list_main"):
             _render_title()
@@ -1710,6 +1573,11 @@ def _preview_user() -> CurrentUser:
 if __name__ == "__main__":
     # 단독 실행 시 샘플 사용자로 화면을 미리 봅니다. 화면 이동은 app.py에서 처리할 예정이라 안내만 띄웁니다.
     st.set_page_config(page_title="PACS 검사 목록", layout="wide")
+    # 왼쪽 사이드바는 app.py가 그리는 공통 부품이라, 미리보기에서도 같은 부품으로 그립니다(메뉴 이동은 안내만).
+    from src.ui.components import sidebar
+
+    if sidebar.render(sidebar.SCREEN_CASE_LIST) is not None:
+        st.toast("다른 화면 이동은 app.py 연결 후 동작합니다.")
     event = render(_preview_user())
     if event is not None and event.kind == EVENT_LOGOUT:
         # 로그아웃 동작 미리보기: 이 화면의 세션 값을 지우고 처음 상태로 다시 그립니다.
@@ -1721,6 +1589,4 @@ if __name__ == "__main__":
             EVENT_EDIT: "수정 화면(검사 등록 수정 모드) 이동은 app.py 연결 후 동작합니다.",
             EVENT_OPEN_VIEWER: "영상 뷰어 화면은 준비 중입니다.",
         }
-        targets = {TARGET_CASE_REGISTER: "검사 등록", TARGET_REVIEW_ASSIGN: "검토 배정"}
-        message = preview_messages.get(event.kind) or f"{targets.get(event.target or '', '해당')} 화면은 준비 중입니다."
-        st.toast(message)
+        st.toast(preview_messages.get(event.kind, "해당 화면은 준비 중입니다."))
