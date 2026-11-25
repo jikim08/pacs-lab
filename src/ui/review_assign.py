@@ -9,7 +9,7 @@
 - 환자 검색 + 등록일 기간 달력 + 검색 버튼: 검사 목록 화면과 같은 동작입니다(검색 버튼을 눌러야 적용).
 - 검사 표: "미배정" 탭과 "배정 완료" 탭. 줄을 누르면 왼쪽 체크박스가 켜집니다(한 번에 한 건만, 다른 줄을 누르면
   기존 체크는 풀림). "배정" 버튼을 누르면 화면 가운데 배정 창이 뜹니다(배정 완료 탭에서는 재배정 창).
-- 배정 창: 선택한 검사, (재배정이면) 기존 검토자, 검토자 선택(현재 업무량 표시), 배정 메모(선택)를 보여주고
+- 배정 창: 선택한 검사, (재배정이면) 기존 검토자, 검토자 선택(현재 업무량 표시)을 보여주고
   "배정하기"를 누르면 저장합니다. 결과는 완료 안내 또는 실패 안내 창으로 보여줍니다.
   재배정 창의 검토자 보기에는 기존 검토자에 "현재 담당" 표시가 붙고, 그를 다시 고르면 저장하지 않고
   "재배정이 실패하였습니다" 안내를 띄웁니다.
@@ -20,8 +20,11 @@
 권한: 화면, 검토자 업무 현황, 배정 이력은 모든 역할이 볼 수 있고,
 체크박스와 배정 버튼은 업무 담당자(ADMIN)에게만 보입니다.
 
-저장: ``save_assignment(user, request)``가 배정 문서(case_assignees)를 바꾸고 변경 이력(case_history)을 남깁니다.
-팀의 배정 서비스 함수가 생기면 이 함수 안을 그 함수 호출로 바꾸면 됩니다.
+저장: ``save_assignment(user, request)``가 담당자 문서(case_assignees)를 바꾼 뒤 배정 이력(case_history)을 따로 남깁니다.
+- 담당자 저장이 실패하면 아무것도 바뀌지 않았으므로 실패 안내를 띄웁니다.
+- 담당자는 저장됐는데 이력 저장이 실패하면 같은 이력(같은 history_id)으로 몇 번 더 시도합니다. 그래도 안 되면
+  배정은 완료로 안내하고, 그 이력을 세션에 남겨 두었다가 배정 이력 창을 열거나 다음 배정을 할 때 다시 저장합니다.
+팀의 배정 서비스 함수(담당자·이력을 한 번에 저장)가 생기면 이 함수 안을 그 함수 호출로 바꾸면 됩니다.
 
 app.py에서는 ``render(current_user)``를 호출하고, 반환된 ``ReviewAssignEvent``로 화면 이동(왼쪽 메뉴, 로그아웃)을
 처리합니다. 로그아웃은 화면 가운데 확인창을 거친 뒤에 EVENT_LOGOUT을 보냅니다.
@@ -46,7 +49,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import streamlit as st
 
-from src.exception import AppError
+from src.exception import AppError, ConflictError
 from src.ui import case_list as _list
 from src.ui.case_list import (
     CALENDAR_PRESETS,
@@ -83,6 +86,10 @@ PENDING_STATUSES = frozenset({STATUS_ASSIGNED, STATUS_REVIEWING})
 # 업무 변경 이력(models.py의 CaseHistory.kind) 중 담당자 배정·변경 기록
 HISTORY_ASSIGNMENT = "ASSIGNMENT_CHANGED"
 
+# 담당자 저장 뒤 배정 이력 저장이 일시적으로 실패하면 같은 이력으로 이 횟수까지 시도합니다(시도 사이 0.3초, 0.6초).
+HISTORY_SAVE_ATTEMPTS = 3
+HISTORY_RETRY_SECONDS = 0.3
+
 # 같은 사용자 화면에서 이 시간(초) 안에는 검토 담당자 목록을 다시 불러오지 않습니다.
 REVIEWER_CACHE_SECONDS = 30
 
@@ -105,8 +112,6 @@ UNASSIGNED_LABEL = "미배정"  # 배정 이력에서 최초 배정의 이전 �
 # 배정 창(Figma "검사 배정", "검사 배정(재배정)")
 ASSIGN_TITLES = {False: "검토자 배정", True: "검토자 재배정"}
 ASSIGN_GUIDE = "선택한 검사를 담당할 검토자를 지정하세요."
-MEMO_PLACEHOLDER = "검토자에게 전달할 내용을 입력하세요."
-MAX_MEMO_CHARS = 200
 CURRENT_REVIEWER_TAG = "현재 담당"  # 재배정 창에서 기존 검토자 보기 옆 표시
 
 # 결과 안내 창(Figma "배정 완료 안내", "배정 실패 안내"): 제목과 (안내, 보조 문구)
@@ -115,6 +120,9 @@ DONE_LINES = {
     False: ("선택한 검사를 담당 검토자에게 배정했습니다.", "배정 이력에서 처리 내역을 확인할 수 있습니다."),
     True: ("선택한 검사의 담당 검토자를 변경했습니다.", "배정 이력에서 처리 내역을 확인할 수 있습니다."),
 }
+# 담당자는 저장했지만 배정 이력을 기록하지 못했을 때(제목은 완료 제목을 씀)
+DONE_HISTORY_PENDING = ("담당 검토자는 지정했지만 배정 이력을 기록하지 못했습니다.", "배정 이력 창을 열면 기록을 다시 시도합니다.")
+MSG_HISTORY_PENDING = "기록하지 못한 배정 이력 {count}건 · 창을 다시 열면 다시 시도합니다."
 FAIL_TITLES = {False: "배정이 실패하였습니다.", True: "재배정이 실패하였습니다."}
 FAIL_SAME_REVIEWER = ("이미 배정된 담당 검토자입니다.", "검토자를 다시 확인해주세요.")
 FAIL_CASE_CHANGED = ("검사 상태가 바뀌었습니다.", "목록을 새로 불러왔습니다. 다시 확인해주세요.")
@@ -139,8 +147,9 @@ _HISTORY_OPEN_KEY = "_pacs_asg_history_open"
 _HISTORY_CACHE_KEY = "_pacs_asg_history_cache"  # 배정 이력 창을 연 동안만 보관
 _DIALOG_KEY = "_pacs_asg_dialog"  # 열려 있는 배정 창(AssignTarget)
 _PICK_KEY = "_pacs_asg_pick"  # 배정 창에서 고른 검토자 UID
-_MEMO_KEY = "_pacs_asg_memo"  # 배정 창의 메모 입력칸
 _RESULT_KEY = "_pacs_asg_result"  # 배정 결과 안내 창(AssignResult)
+# 저장하지 못한 배정 이력 [이력 문서]. 다른 화면에 다녀와도 남도록 _STATE_PREFIX와 다른 이름을 씁니다(reset_state가 안 지움).
+_PENDING_HISTORY_KEY = "_pacs_assign_pending_history"
 _CONFIRM_KEY = "_pacs_asg_confirm"  # 로그아웃 확인창 열림
 _EVENT_KEY = "_pacs_asg_event"
 _NOTICE_KEY = "_pacs_asg_notice"
@@ -207,7 +216,6 @@ class AssignRequest:
     case_id: str
     reviewer_uid: str  # 새 담당 검토자
     previous_uid: str  # 기존 담당 검토자(신규 배정이면 "")
-    memo: str  # 배정 메모(선택, 없으면 "")
     reassign: bool
 
 
@@ -218,6 +226,10 @@ class AssignResult:
     ok: bool
     reassign: bool
     lines: tuple[str, str]  # (안내, 보조 문구)
+
+
+class HistoryNotSavedError(Exception):
+    """담당자는 저장했지만 배정 이력을 기록하지 못했을 때 save_assignment가 냅니다(이력은 나중에 다시 저장)."""
 
 
 @dataclass(frozen=True)
@@ -329,12 +341,13 @@ def can_assign(user: CurrentUser) -> bool:
 
 
 def save_assignment(user: CurrentUser, request: AssignRequest) -> None:
-    """담당자 배정을 저장합니다: 배정 권한 확인 → 현재 담당자 문서 교체 → 변경 이력 추가. 실패하면 예외를 냅니다.
+    """담당자 배정을 저장합니다: 배정 권한 확인 → 현재 담당자 문서 교체 → 배정 이력 추가.
 
-    배정 메모는 팀 모델에 저장할 자리가 아직 없어 변경 이력 문서에 memo로 함께 넣습니다(팀 확정 필요).
+    - 권한 확인이나 담당자 저장이 실패하면 그 예외를 그대로 냅니다(아무것도 바뀌지 않음).
+    - 담당자 저장 뒤 이력 저장이 끝내 실패하면 그 이력을 세션에 남기고 HistoryNotSavedError를 냅니다.
+      남긴 이력은 retry_pending_history()가 다시 저장합니다.
     """
     from src.repositories.case import save_case_assignment
-    from src.repositories.review import save_case_history
     from src.services.access_policy import require_case_assignment
 
     require_case_assignment(user.uid)
@@ -347,9 +360,52 @@ def save_assignment(user: CurrentUser, request: AssignRequest) -> None:
         "before_value": request.previous_uid or None, "after_value": request.reviewer_uid,
         "changed_by": user.uid, "created_at": now,
     }
-    if request.memo:
-        history["memo"] = request.memo
-    save_case_history(history)
+    if not save_history(history):
+        st.session_state.setdefault(_PENDING_HISTORY_KEY, []).append(history)
+        raise HistoryNotSavedError(request.case_id)
+
+
+def save_history(history: Mapping[str, object], attempts: int = HISTORY_SAVE_ATTEMPTS) -> bool:
+    """배정 이력 한 건을 저장하고, 저장됐으면 True를 돌려줍니다.
+
+    - 일시적인 오류(네트워크 등)는 같은 이력(같은 history_id)으로 attempts번까지 시도합니다.
+    - "같은 history_id가 이미 있음"(ConflictError)은 앞선 시도가 실제로는 저장된 것이므로 성공으로 봅니다.
+    - 미구현·권한·입력 오류는 다시 해도 같으므로 바로 False를 돌려줍니다.
+    """
+    from src.repositories.review import save_case_history
+
+    for attempt in range(1, attempts + 1):
+        try:
+            save_case_history(dict(history))
+            return True
+        except ConflictError:
+            return True
+        except NotImplementedError:
+            _logger.info("변경 이력 저장(save_case_history)이 아직 구현되지 않았습니다.")
+            return False
+        except (AppError, PermissionError):
+            _logger.exception("배정 이력 저장 실패(다시 시도하지 않음)")
+            return False
+        except Exception:
+            _logger.warning("배정 이력 저장 실패(%d/%d)", attempt, attempts, exc_info=True)
+            if attempt < attempts:
+                time.sleep(HISTORY_RETRY_SECONDS * attempt)
+    return False
+
+
+def pending_history_count() -> int:
+    return len(st.session_state.get(_PENDING_HISTORY_KEY) or [])
+
+
+def retry_pending_history() -> int:
+    """저장하지 못하고 남겨 둔 배정 이력을 한 번씩 다시 저장합니다. 그래도 남은 건수를 돌려줍니다."""
+    pending = st.session_state.get(_PENDING_HISTORY_KEY) or []
+    left = [history for history in pending if not save_history(history, attempts=1)]
+    if left:
+        st.session_state[_PENDING_HISTORY_KEY] = left
+    else:
+        st.session_state.pop(_PENDING_HISTORY_KEY, None)
+    return len(left)
 
 
 def _get_reviewers(user: CurrentUser) -> tuple[list[Reviewer], bool]:
@@ -950,6 +1006,8 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
 .st-key-pacs_asg_hist_close button:hover { background:#f5f5f5 !important; }
 .st-key-pacs_asg_hist_close button p { font-size:calc(12 * var(--u)) !important; line-height:calc(18 * var(--u)) !important; font-weight:500 !important; color:#333 !important; }
 .st-key-pacs_asg_hist_sub { font-size:calc(12 * var(--u)); line-height:calc(18 * var(--u)); color:#737373; }
+.st-key-pacs_asg_hist_pending { margin-top:calc(-12 * var(--u)); font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#c0392b; }
+.st-key-pacs_asg_stage .st-key-pacs_asg_hist:has(.st-key-pacs_asg_hist_pending) .st-key-pacs_asg_hist_list { height:calc(528 * var(--u)) !important; }
 /* 기록 목록 높이 = 705 - 위아래 여백 56 - 제목 줄 38 - 안내 18 - 간격 40 */
 .st-key-pacs_asg_stage .st-key-pacs_asg_hist_list {
   flex:0 0 auto !important; height:calc(553 * var(--u)) !important; min-height:0 !important; overflow-y:auto !important; overflow-x:hidden; gap:calc(20 * var(--u)) !important;
@@ -1057,22 +1115,6 @@ html, body, .stApp, .stMain { background:#f6f6f6 !important; }
   padding:0 !important; border:0 !important; border-radius:calc(5 * var(--u)) !important; box-shadow:none !important; background:transparent !important; cursor:pointer;
 }
 :is([class*="st-key-pacs_asg_opt_on_"], [class*="st-key-pacs_asg_opt_off_"]) button p { font-size:0 !important; }
-/* 배정 메모: 라벨 11 Medium, 입력칸 테두리 #ddd, 글자 11 */
-.st-key-pacs_asg_stage .st-key-pacs_asg_dlg_memo { gap:calc(6 * var(--u)) !important; }
-.st-key-pacs_asg_dlg_memo_label { font-size:calc(11 * var(--u)); line-height:calc(17 * var(--u)); font-weight:500; color:#666; }
-.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"] {
-  height:calc(42 * var(--u)) !important; min-height:0 !important; background:#fff !important;
-  border:1px solid #ddd !important; border-radius:calc(4 * var(--u)) !important; box-shadow:none !important;
-}
-.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"]:focus-within { border-color:#555 !important; }
-.st-key-pacs_asg_dlg_memo [data-testid="stTextInputRootElement"] > div,
-.st-key-pacs_asg_dlg_memo [data-baseweb="base-input"] { background:transparent !important; }
-.st-key-pacs_asg_dlg_memo input {
-  height:100% !important; padding:0 calc(12 * var(--u)) !important; background:transparent !important;
-  color:#333 !important; -webkit-text-fill-color:#333; font-family:inherit !important; font-size:calc(11 * var(--u)) !important;
-}
-.st-key-pacs_asg_dlg_memo input::placeholder { color:#858585 !important; -webkit-text-fill-color:#858585; opacity:1; }
-.st-key-pacs_asg_dlg_memo [data-testid="InputInstructions"] { display:none !important; }
 /* 아래 버튼: 오른쪽 정렬, 높이 40, 사이 8 */
 .st-key-pacs_asg_stage :is(.st-key-pacs_asg_dlg_actions, .st-key-pacs_asg_res_actions) {
   flex-wrap:nowrap !important; justify-content:flex-end !important; gap:calc(8 * var(--u)) !important;
@@ -1195,7 +1237,7 @@ def _toggle(case_id: str) -> None:
 
 
 def _clear_dialog() -> None:
-    for key in (_DIALOG_KEY, _PICK_KEY, _MEMO_KEY):
+    for key in (_DIALOG_KEY, _PICK_KEY):
         st.session_state.pop(key, None)
 
 
@@ -1236,6 +1278,7 @@ def _on_assign_submit() -> None:
     - 재배정에서 기존 검토자를 고르면 저장하지 않고 실패 안내를 띄우고, 배정 창은 그대로 둡니다(다시 고르기).
     - 그 사이 검사 상태가 바뀌었거나 저장에 실패하면 배정 창을 닫고 실패 안내를 띄웁니다.
     - 성공하면 체크와 배정 창을 지우고, 목록·검토자 업무 현황을 새로 불러옵니다.
+    - 담당자는 저장했지만 이력을 기록하지 못하면 완료로 안내하되, 이력을 기록하지 못했다고 알립니다.
     """
     state = st.session_state
     target = state.get(_DIALOG_KEY)
@@ -1264,11 +1307,19 @@ def _on_assign_submit() -> None:
         return
 
     request = AssignRequest(
-        case_id=target.case_id, reviewer_uid=reviewer_uid, previous_uid=previous_uid,
-        memo=str(state.get(_MEMO_KEY) or "").strip()[:MAX_MEMO_CHARS], reassign=reassign,
+        case_id=target.case_id, reviewer_uid=reviewer_uid, previous_uid=previous_uid, reassign=reassign,
     )
+    retry_pending_history()  # 전에 기록하지 못한 이력이 있으면 먼저 다시 저장해 봅니다.
     try:
         save_assignment(user, request)
+    except HistoryNotSavedError:
+        # 담당자는 바뀌었으므로 완료로 안내하고, 이력은 세션에 남겨 나중에 다시 저장합니다.
+        _clear_dialog()
+        state.pop(_SELECTED_KEY, None)
+        _list.refresh_exams()
+        refresh_reviewers()
+        _show_result(True, reassign, DONE_HISTORY_PENDING)
+        return
     except NotImplementedError:
         _logger.info("배정 저장 기능(save_case_assignment 등)이 아직 구현되지 않았습니다.")
         lines = FAIL_NOT_READY
@@ -1285,6 +1336,7 @@ def _on_assign_submit() -> None:
         _show_result(True, reassign, DONE_LINES[reassign])
         return
     _clear_dialog()
+    _list.refresh_exams()  # 응답만 늦게 실패한 경우 실제로는 저장됐을 수 있으니 목록을 새로 불러옵니다.
     _show_result(False, reassign, lines)
 
 
@@ -1292,6 +1344,7 @@ def _open_history() -> None:
     _cal_close()
     st.session_state[_HISTORY_OPEN_KEY] = True
     st.session_state.pop(_HISTORY_CACHE_KEY, None)  # 열 때마다 최신 이력을 불러옵니다.
+    retry_pending_history()  # 기록하지 못한 이력이 있으면 먼저 다시 저장해 이번 목록에 나오게 합니다.
 
 
 def _close_history() -> None:
@@ -1628,6 +1681,9 @@ def _render_history(entries: list[HistoryEntry], failed: bool) -> None:
             with st.container(key="pacs_asg_hist_close"):
                 st.button("×", key="pacs_asg_hist_close_button", on_click=_close_history)
         _text("pacs_asg_hist_sub", "검토자 지정 및 변경 내역을 확인하세요.")
+        pending = pending_history_count()
+        if pending:
+            _text("pacs_asg_hist_pending", MSG_HISTORY_PENDING.format(count=pending))
         with st.container(key="pacs_asg_hist_list"):
             if failed or not entries:
                 _text("pacs_asg_hist_empty", MSG_HISTORY_FAILED if failed else MSG_HISTORY_EMPTY, align="center")
@@ -1684,12 +1740,6 @@ def _render_assign(target: AssignTarget, exam: ExamRecord, loads: list[ReviewerL
                             f"{load.name} 선택", key=f"pacs_asg_optbtn_{index}_{load.uid}",
                             width="stretch", on_click=_pick_reviewer, args=(load.uid,),
                         )
-        with st.container(key="pacs_asg_dlg_memo"):
-            _text("pacs_asg_dlg_memo_label", "배정 메모 (선택)")
-            st.text_input(
-                "배정 메모", key=_MEMO_KEY, placeholder=MEMO_PLACEHOLDER,
-                max_chars=MAX_MEMO_CHARS, label_visibility="collapsed",
-            )
         with st.container(key="pacs_asg_dlg_actions", horizontal=True):
             st.button("취소", key="pacs_asg_dlg_cancel", on_click=_close_assign)
             st.button(
