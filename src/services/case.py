@@ -17,6 +17,10 @@ _KST = timezone(timedelta(hours=9))
 # 케이스 ID 규칙 (Firestore 자동 ID: 영문·숫자)
 _CASE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
+# 케이스 등록 시 초기 상태 (models.CaseStatus 값만 허용)
+# 초기값을 "검토 대기" 라는 문자열로 작성하면, 오타를 내도 아무도 잡지 못함. 그렇기에 상수로 저장.
+_INITIAL_STATUS: CaseStatus = "검토 대기"
+
 def create_case(
     patient_id: str,
     department_id: str,
@@ -59,7 +63,8 @@ def create_case(
         "exam_type": exam_type.strip(),
         "exam_info": exam_info.strip(),
         "created_by": created_by.strip(),
-        "status": "검토 대기",
+        # 초기값을 문자열이 아닌 상수로 저장
+        "status": _INITIAL_STATUS,
     }
 
     #repositories에 저장 요청
