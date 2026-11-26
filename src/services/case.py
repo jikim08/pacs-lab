@@ -9,6 +9,7 @@ from src.repositories.patient import patient_exists, get_patient
 from src.repositories.department import department_exists, get_department
 from src.services.access_policy import require_case_registration, require_case_read
 from src.exception import NotFoundError, ValidationError
+from src.repositories.image import list_case_files
 
 
 # 한국 시간(UTC+9). 등록일 기간은 한국 날짜 기준
@@ -114,7 +115,10 @@ def get_case_list(uid: str, limit: int = 50) -> list[dict]:
 # 케이스 상세 조회
 # 없는 케이스는 NotFoundError
 # 환자·진료과 정보를 함께 반환, 참조 대상이 없으면 None (화면에서 찾을 수 없음 안내)
+# 영상 목록(원본·결과)을 "files"로 함께 반환 (등록 오래된 순)
 # 담당자·영상·처리 결과는 해당 저장 기능 구현 후 연결
+# 케이스의 원본 영상, 처리 결과 및 검토 상태를 확인한다고 했으니, 원본과 결과 모두 가져옴.
+# 실제 화면에서는 kind로 구분하면 됩니당~
 def get_case_detail(uid: str, case_id: str) -> dict:
     require_case_read(uid)
 
@@ -133,6 +137,8 @@ def get_case_detail(uid: str, case_id: str) -> dict:
         **case,
         "patient": get_patient(patient_id) if patient_id else None,
         "department": get_department(department_id) if department_id else None,
+        # 상세 조회 결과에 files 라는 key 하나 생김.
+        "files": list_case_files(case["case_id"]),
     }
 
 
