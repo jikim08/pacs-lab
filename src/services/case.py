@@ -9,6 +9,7 @@ from src.repositories.patient import patient_exists, get_patient
 from src.repositories.department import department_exists, get_department
 from src.services.access_policy import require_case_registration, require_case_read
 from src.exception import NotFoundError, ValidationError
+from src.repositories.image import list_case_files
 
 
 # 한국 시간(UTC+9). 등록일 기간은 한국 날짜 기준
@@ -17,12 +18,42 @@ _KST = timezone(timedelta(hours=9))
 # 케이스 ID 규칙 (Firestore 자동 ID: 영문·숫자)
 _CASE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
+# 케이스 등록 시 초기 상태 (models.CaseStatus 값만 허용)
+# 초기값을 "검토 대기" 라는 문자열로 작성하면, 오타를 내도 아무도 잡지 못함. 그렇기에 상수로 저장.
+_INITIAL_STATUS: CaseStatus = "검토 대기"
+
+
+# 검사 일시 입력값을 시간대가 있는 datetime으로 바꾼다 (없으면 None)
+# 날짜(date)만 오면 한국 시간 그날 0시, 시각(datetime)은 시간대 정보 필수, 미래 시각은 거부
+
+# 간단히 요약하면, 검사 일시에 대한 검사이다. 검사 일시 값이 제대로 들어왔는지 확인하는 함수.
+# date, datetime 둘 다 받아서, 하나의 시간 형식으로 통일하기에 date, datetime 둘 다 받음. (datetime 은 시간 x, date는 시간 o)
+def _to_exam_at(value: date | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, datetime): # datetime은 date의 하위 클래스이기에 검사 순서가 우선된다.
+        # 존재하는지
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValidationError("검사 일시에는 시간대 정보가 필요합니다.")
+        exam_at = value
+    elif isinstance(value, date):
+        # 맞는 형식인지, 한국 시간으로 변환
+        exam_at = datetime.combine(value, time.min, tzinfo=_KST)
+    else:
+        raise ValidationError("검사 일시는 날짜 또는 날짜와 시각이어야 합니다.")
+        # 현재보다 늦지는 않는지.
+    if exam_at > datetime.now(timezone.utc):
+        raise ValidationError("검사 일시는 현재보다 늦을 수 없습니다.")
+    return exam_at
+
 def create_case(
     patient_id: str,
     department_id: str,
     exam_type: str,
     exam_info: str,
     created_by: str,
+    exam_at: date | datetime | None = None,
 ) -> str:
 
     # 등록 권한 검사
@@ -41,9 +72,11 @@ def create_case(
     for name, value in required_fields.items():
         if not value or not value.strip():
             raise ValidationError(f"{name} 정보가 필요합니다.")
-    
+
+    # 검사 일시 검증·변환 (선택 항목)
     # 앞뒤 공백을 제거한 ID로 조회
     # 환자 및 진료과 존재 여부 확인
+    exam_at = _to_exam_at(exam_at)
     patient_id = patient_id.strip()
     department_id = department_id.strip()
 
@@ -59,7 +92,9 @@ def create_case(
         "exam_type": exam_type.strip(),
         "exam_info": exam_info.strip(),
         "created_by": created_by.strip(),
-        "status": "검토 대기",
+        # 초기값을 문자열이 아닌 상수로 저장
+        "status": _INITIAL_STATUS,
+        "exam_at": exam_at,
     }
 
     #repositories에 저장 요청
@@ -80,7 +115,10 @@ def get_case_list(uid: str, limit: int = 50) -> list[dict]:
 # 케이스 상세 조회
 # 없는 케이스는 NotFoundError
 # 환자·진료과 정보를 함께 반환, 참조 대상이 없으면 None (화면에서 찾을 수 없음 안내)
+# 영상 목록(원본·결과)을 "files"로 함께 반환 (등록 오래된 순)
 # 담당자·영상·처리 결과는 해당 저장 기능 구현 후 연결
+# 케이스의 원본 영상, 처리 결과 및 검토 상태를 확인한다고 했으니, 원본과 결과 모두 가져옴.
+# 실제 화면에서는 kind로 구분하면 됩니당~
 def get_case_detail(uid: str, case_id: str) -> dict:
     require_case_read(uid)
 
@@ -99,6 +137,8 @@ def get_case_detail(uid: str, case_id: str) -> dict:
         **case,
         "patient": get_patient(patient_id) if patient_id else None,
         "department": get_department(department_id) if department_id else None,
+        # 상세 조회 결과에 files 라는 key 하나 생김.
+        "files": list_case_files(case["case_id"]),
     }
 
 
