@@ -21,12 +21,38 @@ _CASE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 # 초기값을 "검토 대기" 라는 문자열로 작성하면, 오타를 내도 아무도 잡지 못함. 그렇기에 상수로 저장.
 _INITIAL_STATUS: CaseStatus = "검토 대기"
 
+
+# 검사 일시 입력값을 시간대가 있는 datetime으로 바꾼다 (없으면 None)
+# 날짜(date)만 오면 한국 시간 그날 0시, 시각(datetime)은 시간대 정보 필수, 미래 시각은 거부
+
+# 간단히 요약하면, 검사 일시에 대한 검사이다. 검사 일시 값이 제대로 들어왔는지 확인하는 함수.
+# date, datetime 둘 다 받아서, 하나의 시간 형식으로 통일하기에 date, datetime 둘 다 받음. (datetime 은 시간 x, date는 시간 o)
+def _to_exam_at(value: date | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, datetime): # datetime은 date의 하위 클래스이기에 검사 순서가 우선된다.
+        # 존재하는지
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValidationError("검사 일시에는 시간대 정보가 필요합니다.")
+        exam_at = value
+    elif isinstance(value, date):
+        # 맞는 형식인지, 한국 시간으로 변환
+        exam_at = datetime.combine(value, time.min, tzinfo=_KST)
+    else:
+        raise ValidationError("검사 일시는 날짜 또는 날짜와 시각이어야 합니다.")
+        # 현재보다 늦지는 않는지.
+    if exam_at > datetime.now(timezone.utc):
+        raise ValidationError("검사 일시는 현재보다 늦을 수 없습니다.")
+    return exam_at
+
 def create_case(
     patient_id: str,
     department_id: str,
     exam_type: str,
     exam_info: str,
     created_by: str,
+    exam_at: date | datetime | None = None,
 ) -> str:
 
     # 등록 권한 검사
@@ -45,9 +71,11 @@ def create_case(
     for name, value in required_fields.items():
         if not value or not value.strip():
             raise ValidationError(f"{name} 정보가 필요합니다.")
-    
+
+    # 검사 일시 검증·변환 (선택 항목)
     # 앞뒤 공백을 제거한 ID로 조회
     # 환자 및 진료과 존재 여부 확인
+    exam_at = _to_exam_at(exam_at)
     patient_id = patient_id.strip()
     department_id = department_id.strip()
 
@@ -65,6 +93,7 @@ def create_case(
         "created_by": created_by.strip(),
         # 초기값을 문자열이 아닌 상수로 저장
         "status": _INITIAL_STATUS,
+        "exam_at": exam_at,
     }
 
     #repositories에 저장 요청
